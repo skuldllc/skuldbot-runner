@@ -4,6 +4,7 @@ import asyncio
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -68,33 +69,16 @@ class BotExecutor:
                 await self._install_dependencies(requirements_file)
                 await emit_log("Dependencies installed successfully")
 
-            # 3. Find entry robot file
-            robot_file = self._find_entry_file(extract_dir)
-            if not robot_file:
-                await emit_log("main.skb/main.robot not found in package", LogLevel.ERROR)
-                raise FileNotFoundError("main.skb/main.robot not found in package")
-
-            await emit_log(f"Found entry script {robot_file.name}, starting execution...")
-
-            # 4. Prepare variables from inputs
-            variables = self._prepare_variables(job.inputs)
-            if variables:
-                await emit_log(f"Prepared {len(variables) // 2} input variables")
-
-            # 5. Execute Robot Framework
-            logger.info("Executing Robot Framework", run_id=job.id)
-            output_dir = run_dir / "output"
-            output_dir.mkdir(exist_ok=True)
-
-            await emit_log("Starting Robot Framework execution...")
-
-            result = await self._run_robot(
-                job_id=job.id,
-                robot_file=robot_file,
-                output_dir=output_dir,
-                variables=variables,
-                cwd=extract_dir,
-                on_progress=on_progress,
+            # 3. Execute through shared runtime package (skuldbot-executor)
+            await emit_log("Starting runtime execution...")
+            RuntimeExecutor, RuntimeExecutionMode = self._resolve_runtime_executor()
+            runtime = RuntimeExecutor(mode=RuntimeExecutionMode.PRODUCTION)
+            runtime_result = runtime.run_from_package(
+                str(extract_dir),
+                variables=job.inputs,
+                execution_id=job.id,
+                bot_id=job.bot_id or job.id,
+                bot_name=job.bot_name,
             )
 
             # 6. Parse results
@@ -102,30 +86,44 @@ class BotExecutor:
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
             # Collect artifacts
+            output_dir = extract_dir / "output"
             for artifact_file in output_dir.glob("*"):
                 artifacts.append(str(artifact_file))
 
+            runtime_logs = getattr(runtime_result, "logs", []) or []
+            for log_entry in runtime_logs:
+                message = getattr(log_entry, "message", str(log_entry))
+                if message:
+                    logs.append(message)
+
+            runtime_errors = getattr(runtime_result, "errors", []) or []
+            runtime_error_message = None
+            if runtime_errors:
+                runtime_error_message = "; ".join(str(e.get("message", e)) for e in runtime_errors)
+
+            runtime_success = bool(getattr(runtime_result, "success", False))
+
             # Emit completion log
-            if result["success"]:
+            if runtime_success:
                 await emit_log(
-                    f"Execution completed successfully. Passed: {result.get('passed', 0)}, Failed: {result.get('failed', 0)}"
+                    "Execution completed successfully."
                 )
             else:
                 await emit_log(
-                    f"Execution failed. Error: {result.get('error', 'Unknown error')}",
+                    f"Execution failed. Error: {runtime_error_message or 'Unknown error'}",
                     LogLevel.ERROR
                 )
 
             return RunResult(
                 run_id=job.id,
-                status=RunStatus.SUCCESS if result["success"] else RunStatus.FAILED,
+                status=RunStatus.SUCCESS if runtime_success else RunStatus.FAILED,
                 started_at=started_at,
                 completed_at=completed_at,
                 duration_ms=duration_ms,
-                steps_completed=result.get("passed", 0),
-                steps_failed=result.get("failed", 0),
-                output=result.get("output", {}),
-                error=result.get("error"),
+                steps_completed=0,
+                steps_failed=0 if runtime_success else 1,
+                output=getattr(runtime_result, "output", {}) or {},
+                error=runtime_error_message,
                 logs=logs,
                 artifacts=artifacts,
             )
@@ -350,3 +348,35 @@ class BotExecutor:
                 return recursive
 
         return None
+
+    def _resolve_runtime_executor(self):
+        """Import Executor from the separated executor runtime package."""
+        try:
+            from skuldbot import Executor, ExecutionMode
+            return Executor, ExecutionMode
+        except ImportError:
+            candidate_paths: list[Path] = []
+            env_path = os.environ.get("SKULDBOT_EXECUTOR_PY_PATH")
+            if env_path:
+                candidate_paths.append(Path(env_path).expanduser())
+
+            here = Path(__file__).resolve()
+            projects_root = here.parents[3]
+            candidate_paths.append(projects_root / "skuldbot-executor" / "python")
+
+            for candidate in candidate_paths:
+                if not (candidate / "skuldbot").exists():
+                    continue
+                candidate_str = str(candidate)
+                if candidate_str not in sys.path:
+                    sys.path.insert(0, candidate_str)
+                try:
+                    from skuldbot import Executor, ExecutionMode
+                    return Executor, ExecutionMode
+                except ImportError:
+                    continue
+
+        raise RuntimeError(
+            "Runtime package `skuldbot-executor` not found. "
+            "Set SKULDBOT_EXECUTOR_PY_PATH or install the package in runner environment."
+        )
