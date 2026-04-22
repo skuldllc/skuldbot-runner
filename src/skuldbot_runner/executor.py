@@ -355,26 +355,18 @@ class BotExecutor:
             from skuldbot import Executor, ExecutionMode
             return Executor, ExecutionMode
         except ImportError:
-            candidate_paths: list[Path] = []
             env_path = os.environ.get("SKULDBOT_EXECUTOR_PY_PATH")
             if env_path:
-                candidate_paths.append(Path(env_path).expanduser())
-
-            here = Path(__file__).resolve()
-            projects_root = here.parents[3]
-            candidate_paths.append(projects_root / "skuldbot-executor" / "python")
-
-            for candidate in candidate_paths:
-                if not (candidate / "skuldbot").exists():
-                    continue
-                candidate_str = str(candidate)
-                if candidate_str not in sys.path:
-                    sys.path.insert(0, candidate_str)
-                try:
-                    from skuldbot import Executor, ExecutionMode
-                    return Executor, ExecutionMode
-                except ImportError:
-                    continue
+                candidate = Path(env_path).expanduser()
+                if (candidate / "skuldbot").exists():
+                    candidate_str = str(candidate)
+                    if candidate_str not in sys.path:
+                        sys.path.insert(0, candidate_str)
+                    try:
+                        from skuldbot import Executor, ExecutionMode
+                        return Executor, ExecutionMode
+                    except ImportError:
+                        pass
 
         raise RuntimeError(
             "Runtime package `skuldbot-executor` not found. "
