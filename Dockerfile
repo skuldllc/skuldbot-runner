@@ -22,6 +22,11 @@ WORKDIR /build
 COPY pyproject.toml README.md /build/
 COPY src/ /build/src/
 
+# K-05 reproducible wheel build controls.
+ENV SOURCE_DATE_EPOCH=1704067200 \
+    PYTHONHASHSEED=0 \
+    CFLAGS="-O2 -g0 -fdebug-prefix-map=/build=. -ffile-prefix-map=/build=."
+
 RUN pip install --no-cache-dir --upgrade pip wheel setuptools \
  && pip wheel --no-deps --wheel-dir /dist .
 

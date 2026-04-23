@@ -23,6 +23,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: K-09 gate — Docker runner wheel double-build determinism
+        run: |
+          set -euo pipefail
+          TMP1=$(mktemp -d /tmp/runner-wheel-a.XXXXXX)
+          TMP2=$(mktemp -d /tmp/runner-wheel-b.XXXXXX)
+          trap 'rm -rf "$TMP1" "$TMP2"' EXIT
+
+          docker build --target runner-builder --no-cache -t ip-k09-runner-a:${{ github.sha }} .
+          CID_A=$(docker create ip-k09-runner-a:${{ github.sha }})
+          docker cp "$CID_A:/dist" "$TMP1/dist"
+          docker rm "$CID_A" >/dev/null
+
+          docker build --target runner-builder --no-cache -t ip-k09-runner-b:${{ github.sha }} .
+          CID_B=$(docker create ip-k09-runner-b:${{ github.sha }})
+          docker cp "$CID_B:/dist" "$TMP2/dist"
+          docker rm "$CID_B" >/dev/null
+
+          HASH_A=$(find "$TMP1/dist" -name '*.whl' -maxdepth 1 -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+          HASH_B=$(find "$TMP2/dist" -name '*.whl' -maxdepth 1 -type f -exec sha256sum {} \; | sort | sha256sum | awk '{print $1}')
+          echo "runner_wheel_hash_a=$HASH_A"
+          echo "runner_wheel_hash_b=$HASH_B"
+          if [ -z "$HASH_A" ] || [ -z "$HASH_B" ]; then
+            echo "::error::K-09 failed: missing runner wheel artifacts from runner-builder stage"
+            exit 1
+          fi
+          if [ "$HASH_A" != "$HASH_B" ]; then
+            echo "::error::K-09 failed: non-deterministic runner wheel build"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
