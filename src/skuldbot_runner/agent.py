@@ -1,3 +1,6 @@
+# Copyright (c) 2026 Skuld, LLC. All rights reserved.
+# Proprietary and confidential. Reverse engineering prohibited.
+
 """Main runner agent - the "dumb" worker that polls and executes."""
 
 import asyncio

@@ -11,9 +11,15 @@ permissions:
   id-token: write
 
 jobs:
-  build-and-sign:
-    name: build + sign + publish to ghcr.io/skuldllc
+  ip-gate-pre:
+    # Pre-build static checks: LICENSE, cosign wiring, headers, sourcemaps in repo,
+    # plaintext patterns. Does NOT validate the built artifact — see ip-gate-post.
+    uses: ./.github/workflows/ip-gate.yml
+
+  release:
+    name: build → ip-gate-post → push → sign
     runs-on: ubuntu-latest
+    needs: ip-gate-pre
     steps:
       - uses: actions/checkout@v4
 
@@ -38,8 +44,85 @@ jobs:
             type=semver,pattern=v{{major}}
             type=raw,value=latest
 
-      - name: Build and push
-        id: build
+      - name: Build image locally
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ip-gate-check:${{ github.sha }}
+          build-args: |
+            COMPILER_VERSION=${{ github.ref_name }}
+            EXECUTOR_VERSION=${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: IP gate — no sensitive .py installed in site-packages
+        env:
+          IMAGE: ip-gate-check:${{ github.sha }}
+          SENSITIVE_PREFIXES: "skuldbot/nodes/,skuldbot/ai/,skuldbot/evidence/,skuldbot/policy/,skuldbot_compiler/policy/,skuldbot_compiler/templates/"
+        run: |
+          set -euo pipefail
+          # Runner installs executor + compiler wheels offline — so sensitive .py
+          # must not be present in the installed site-packages either.
+          VIOLATIONS=$(docker run --rm --entrypoint python3 "$IMAGE" - <<'PY'
+          import os, pathlib, sys
+          import site
+          prefixes = tuple(p for p in os.environ["SENSITIVE_PREFIXES"].split(",") if p)
+          hits = []
+          for sp in site.getsitepackages():
+              root = pathlib.Path(sp)
+              if not root.exists():
+                  continue
+              for py_file in root.rglob("*.py"):
+                  rel = str(py_file.relative_to(root))
+                  if any(rel.startswith(p) for p in prefixes):
+                      hits.append(rel)
+          for h in hits:
+              print(h)
+          PY
+          )
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Sensitive .py installed in runner site-packages:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "runner site-packages check PASS"
+
+      - name: IP gate — strings scan on compiled binaries in image
+        env:
+          IMAGE: ip-gate-check:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          PATTERN='BEGIN PROMPT|You are an expert|sk-[a-zA-Z0-9]{32,}|SKULD_ROOTED_KEY_HINT'
+          # Warn-only during bootstrap
+          WARN=$(docker run --rm --entrypoint bash "$IMAGE" -c "
+            find /usr/local/lib -name '*.so' 2>/dev/null | while read f; do
+              if strings \"\$f\" 2>/dev/null | grep -qE '$PATTERN'; then
+                echo \"possible plaintext sensitive: \$f\"
+              fi
+            done
+          ")
+          if [ -n "$WARN" ]; then
+            echo "::warning::strings scan:"
+            echo "$WARN"
+          else
+            echo "strings scan PASS"
+          fi
+
+      - name: IP gate — image size sanity
+        env:
+          IMAGE: ip-gate-check:${{ github.sha }}
+        run: |
+          SIZE=$(docker inspect "$IMAGE" --format '{{.Size}}')
+          SIZE_MB=$((SIZE / 1024 / 1024))
+          echo "image size: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -gt 2000 ]; then
+            echo "::error::image size >2GB — likely bundling regression"
+            exit 1
+          fi
+
+      - name: Push to GHCR
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -49,6 +132,7 @@ jobs:
           build-args: |
             COMPILER_VERSION=${{ github.ref_name }}
             EXECUTOR_VERSION=${{ github.ref_name }}
+          cache-from: type=gha
           provenance: true
           sbom: true
 
@@ -57,7 +141,7 @@ jobs:
 
       - name: Sign image (keyless via OIDC)
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           for tag in $TAGS; do
