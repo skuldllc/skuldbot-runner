@@ -1,0 +1,4 @@
+pip==26.0.1
+setuptools==82.0.1
+wheel==0.47.0
+hatchling==1.27.0

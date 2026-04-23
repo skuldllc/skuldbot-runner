@@ -52,6 +52,7 @@ jobs:
             echo "::error::K-09 failed: non-deterministic runner wheel build"
             exit 1
           fi
+          echo "K09_RUNNER_WHEEL_SHA256=$HASH_A" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -166,8 +167,50 @@ jobs:
           provenance: true
           sbom: true
 
+      - name: Resolve primary tag
+        run: |
+          PRIMARY_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "PRIMARY_TAG=$PRIMARY_TAG" >> "$GITHUB_ENV"
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM (CycloneDX JSON)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          syft "${PRIMARY_TAG}@${DIGEST}" -o cyclonedx-json > sbom.json
+          echo "SBOM_SHA256=$(sha256sum sbom.json | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Generate build-manifest.json
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cat > build-manifest.json <<JSON
+          {
+            "build_id": "${{ github.run_id }}",
+            "commit": "${{ github.sha }}",
+            "repository": "${{ github.repository }}",
+            "builder_image": "python:3.12.12-slim@sha256:f3fa41d74a768c2fce8016b98c191ae8c1bacd8f1152870a3f9f87d350920b7c",
+            "source_date_epoch": 1704067200,
+            "artifact_hashes": {
+              "k09_runner_wheel_sha256": "${K09_RUNNER_WHEEL_SHA256}",
+              "image_digest_sha256": "${DIGEST}",
+              "sbom_sha256": "${SBOM_SHA256}"
+            },
+            "double_build_verified": true
+          }
+          JSON
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
+
+      - name: Attest SBOM and build-manifest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign attest --yes --type cyclonedx --predicate sbom.json "${PRIMARY_TAG}@${DIGEST}"
+          cosign attest --yes --type https://skuldbot.dev/attestations/build-manifest/v1 --predicate build-manifest.json "${PRIMARY_TAG}@${DIGEST}"
 
       - name: Sign image (keyless via OIDC)
         env:
@@ -177,3 +220,11 @@ jobs:
           for tag in $TAGS; do
             cosign sign --yes "${tag}@${DIGEST}"
           done
+
+      - name: Upload reproducibility artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: k13-artifacts-${{ github.run_id }}
+          path: |
+            sbom.json
+            build-manifest.json

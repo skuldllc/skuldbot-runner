@@ -16,10 +16,11 @@ FROM ghcr.io/skuldllc/skuldbot-compiler:${COMPILER_VERSION} AS compiler-wheels
 FROM ghcr.io/skuldllc/skuldbot-executor:${EXECUTOR_VERSION} AS executor-wheels
 
 # ---- Build local wheel ----
-FROM python:3.12-slim AS runner-builder
+FROM python:3.12.12-slim@sha256:f3fa41d74a768c2fce8016b98c191ae8c1bacd8f1152870a3f9f87d350920b7c AS runner-builder
 
 WORKDIR /build
 COPY pyproject.toml README.md /build/
+COPY requirements.build.lock /build/
 COPY src/ /build/src/
 
 # K-05 reproducible wheel build controls.
@@ -27,11 +28,14 @@ ENV SOURCE_DATE_EPOCH=1704067200 \
     PYTHONHASHSEED=0 \
     CFLAGS="-O2 -g0 -fdebug-prefix-map=/build=. -ffile-prefix-map=/build=."
 
-RUN pip install --no-cache-dir --upgrade pip wheel setuptools \
- && pip wheel --no-deps --wheel-dir /dist .
+RUN pip install --no-cache-dir --require-hashes -r /build/requirements.build.lock \
+ && pip wheel --no-deps --no-build-isolation --wheel-dir /dist . \
+ && if command -v strip >/dev/null 2>&1; then \
+      find /dist -name "*.so" -type f -exec strip --strip-unneeded {} \;; \
+    fi
 
 # ---- Runtime ----
-FROM python:3.12-slim AS runtime
+FROM python:3.12.12-slim@sha256:f3fa41d74a768c2fce8016b98c191ae8c1bacd8f1152870a3f9f87d350920b7c AS runtime
 
 LABEL org.opencontainers.image.vendor="Skuld, LLC"
 LABEL org.opencontainers.image.source="https://github.com/skuldllc/skuldbot-runner"

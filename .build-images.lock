@@ -1,0 +1,5 @@
+# K-02 Build image lock (2026-04-23)
+python=python:3.12.12-slim@sha256:f3fa41d74a768c2fce8016b98c191ae8c1bacd8f1152870a3f9f87d350920b7c
+# Internal upstream runtime inputs resolved by release tags:
+compiler=ghcr.io/skuldllc/skuldbot-compiler:${COMPILER_VERSION}
+executor=ghcr.io/skuldllc/skuldbot-executor:${EXECUTOR_VERSION}
