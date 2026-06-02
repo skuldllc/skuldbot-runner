@@ -14,6 +14,7 @@ import structlog
 from .api_client import OrchestratorClient
 from .config import RunnerConfig
 from .executor import BotExecutor
+from .graphical_runtime import detect_graphical_capabilities
 from .models import (
     HeartbeatRequest,
     Job,
@@ -102,6 +103,7 @@ class RunnerAgent:
             labels=self.config.labels,
             capabilities=self.config.capabilities,
             system_info=system_info,
+            graphical_capabilities=detect_graphical_capabilities(),
         )
 
         response = await self.client.register(request)
@@ -130,6 +132,7 @@ class RunnerAgent:
                     status="busy" if self.current_job else "online",
                     current_run_id=self.current_job.id if self.current_job else None,
                     system_info=system_info,
+                    graphical_capabilities=detect_graphical_capabilities(),
                 )
 
                 await self.client.heartbeat(request)

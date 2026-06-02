@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RunStatus(str, Enum):
@@ -45,6 +45,93 @@ class LogLevel(str, Enum):
     ERROR = "error"
 
 
+class GraphicalRuntimePlane(str, Enum):
+    """Graphical runtime planes supported by the Orchestrator contract."""
+
+    WINDOWS_INTERACTIVE = "windows_interactive"
+    CITRIX_PUBLISHED_APP = "citrix_published_app"
+    REMOTE_DESKTOP = "remote_desktop"
+    LINUX_VIRTUAL_DISPLAY = "linux_virtual_display"
+
+
+class GraphicalSessionMode(str, Enum):
+    """Session modes supported by the graphical runtime contract."""
+
+    ATTENDED = "attended"
+    UNATTENDED = "unattended"
+
+
+class GraphicalDisplayState(str, Enum):
+    """Display state values accepted by the Orchestrator contract."""
+
+    AVAILABLE = "available"
+    ACTIVE = "active"
+    LOCKED = "locked"
+    DISCONNECTED = "disconnected"
+    STALE = "stale"
+    UNAVAILABLE = "unavailable"
+
+
+class VisualActionKind(str, Enum):
+    """Visual action kinds supported by graphical runner capabilities."""
+
+    SCREENSHOT = "screenshot"
+    WAIT_IMAGE = "wait_image"
+    IMAGE_CLICK = "image_click"
+    OCR_REGION = "ocr_region"
+    ASSERT_TEXT = "assert_text"
+    TYPE_TEXT = "type_text"
+    HOTKEY = "hotkey"
+
+
+class DisplayResolution(BaseModel):
+    """Display resolution reported to Orchestrator."""
+
+    width: int
+    height: int
+
+
+class GraphicalDisplayStateInfo(BaseModel):
+    """Current display state reported by the runner."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    state: GraphicalDisplayState
+    locked: bool
+    connected: bool
+    resolution: DisplayResolution
+    dpi_scale: float = Field(serialization_alias="dpiScale")
+    active_window_title: str | None = Field(
+        default=None,
+        serialization_alias="activeWindowTitle",
+    )
+    last_frame_at: str | None = Field(default=None, serialization_alias="lastFrameAt")
+    stale_after_seconds: int = Field(serialization_alias="staleAfterSeconds")
+
+
+class GraphicalRunnerCapabilities(BaseModel):
+    """Explicit graphical capability declaration for fail-closed routing."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    has_display: bool = Field(serialization_alias="hasDisplay")
+    display: GraphicalDisplayStateInfo
+    supported_runtime_planes: list[GraphicalRuntimePlane] = Field(
+        serialization_alias="supportedRuntimePlanes",
+    )
+    supported_session_modes: list[GraphicalSessionMode] = Field(
+        serialization_alias="supportedSessionModes",
+    )
+    supported_visual_actions: list[VisualActionKind] = Field(
+        serialization_alias="supportedVisualActions",
+    )
+    max_graphical_sessions: int = Field(serialization_alias="maxGraphicalSessions")
+    current_graphical_sessions: int = Field(
+        serialization_alias="currentGraphicalSessions",
+    )
+    installed_systems: list[str] = Field(serialization_alias="installedSystems")
+
+
 # ============================================
 # Registration
 # ============================================
@@ -65,10 +152,16 @@ class SystemInfo(BaseModel):
 class RegisterRequest(BaseModel):
     """Request to register a new runner."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     labels: dict[str, str] = Field(default_factory=dict)
     capabilities: list[str] = Field(default_factory=list)
-    system_info: SystemInfo
+    system_info: SystemInfo = Field(serialization_alias="systemInfo")
+    graphical_capabilities: GraphicalRunnerCapabilities | None = Field(
+        default=None,
+        serialization_alias="graphicalCapabilities",
+    )
 
 
 class RegisterResponse(BaseModel):
@@ -113,9 +206,15 @@ class RegisterResponse(BaseModel):
 class HeartbeatRequest(BaseModel):
     """Heartbeat request with current status."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     status: str = "online"  # online, busy, offline
     current_run_id: str | None = None
     system_info: SystemInfo | None = None
+    graphical_capabilities: GraphicalRunnerCapabilities | None = Field(
+        default=None,
+        serialization_alias="graphicalCapabilities",
+    )
 
 
 class HeartbeatResponse(BaseModel):

@@ -23,6 +23,7 @@ from .models import (
     StepProgress,
     StepStatus,
 )
+from .payloads import build_heartbeat_payload
 
 logger = structlog.get_logger()
 
@@ -72,7 +73,7 @@ class OrchestratorClient:
 
         response = await self.client.post(
             "/runners/register",
-            json=request.model_dump(),
+            json=request.model_dump(by_alias=True, exclude_none=True),
         )
         response.raise_for_status()
 
@@ -92,20 +93,9 @@ class OrchestratorClient:
     )
     async def heartbeat(self, request: HeartbeatRequest) -> HeartbeatResponse:
         """Send heartbeat to Orchestrator."""
-        payload: dict[str, Any] = {"status": request.status}
-        if request.current_run_id:
-            payload["currentRunId"] = request.current_run_id
-
-        if request.system_info:
-            payload["metrics"] = {
-                "cpuPercent": 0,
-                "memoryPercent": 0,
-                "activeSteps": 0,
-            }
-
         response = await self.client.post(
             "/runner-agent/heartbeat",
-            json=payload,
+            json=build_heartbeat_payload(request),
         )
         response.raise_for_status()
 
