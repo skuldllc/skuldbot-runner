@@ -15,6 +15,7 @@ from .models import (
     GraphicalRunnerCapabilities,
     VisualActionKind,
 )
+from .visual_adapter import RpaDesktopVisualAdapter, VisualAdapterError
 
 DISPLAY_READY_STATES = {
     GraphicalDisplayState.AVAILABLE,
@@ -33,6 +34,8 @@ class VisualActionResult:
     action: VisualActionKind
     success: bool
     artifact_path: str | None = None
+    checksum_sha256: str | None = None
+    size_bytes: int | None = None
     message: str | None = None
 
     def to_robot_dict(self) -> dict[str, Any]:
@@ -40,6 +43,8 @@ class VisualActionResult:
             "action": self.action.value,
             "success": self.success,
             "artifactPath": self.artifact_path,
+            "checksumSha256": self.checksum_sha256,
+            "sizeBytes": self.size_bytes,
             "message": self.message,
         }
 
@@ -88,20 +93,20 @@ class SkuldBotVisualKeywords:
 
         require_visual_action(self._capabilities, VisualActionKind.SCREENSHOT)
         resolved_path = self._ensure_output_path(output_path)
-        backend = self._desktop_backend()
-        backend.take_screenshot(str(resolved_path))
+        artifact = self._execute_adapter(lambda adapter: adapter.screenshot(resolved_path))
         return VisualActionResult(
             action=VisualActionKind.SCREENSHOT,
             success=True,
-            artifact_path=str(resolved_path),
+            artifact_path=artifact.path,
+            checksum_sha256=artifact.checksum_sha256,
+            size_bytes=artifact.size_bytes,
         ).to_robot_dict()
 
     def desktop_type_text(self, text: str) -> dict[str, Any]:
         """Type text into the active graphical session."""
 
         require_visual_action(self._capabilities, VisualActionKind.TYPE_TEXT)
-        backend = self._desktop_backend()
-        backend.type_text(text)
+        self._execute_adapter(lambda adapter: adapter.type_text(text))
         return VisualActionResult(
             action=VisualActionKind.TYPE_TEXT,
             success=True,
@@ -114,8 +119,7 @@ class SkuldBotVisualKeywords:
         require_visual_action(self._capabilities, VisualActionKind.HOTKEY)
         if not keys:
             raise VisualActionError("At least one key is required.")
-        backend = self._desktop_backend()
-        backend.press_keys(*keys)
+        self._execute_adapter(lambda adapter: adapter.hotkey(tuple(keys)))
         return VisualActionResult(
             action=VisualActionKind.HOTKEY,
             success=True,
@@ -126,13 +130,12 @@ class SkuldBotVisualKeywords:
         """Click the first matching image in the active graphical session."""
 
         require_visual_action(self._capabilities, VisualActionKind.IMAGE_CLICK)
-        self._require_existing_file(image_path)
-        backend = self._desktop_backend()
-        backend.click(image_path)
+        resolved_path = self._require_existing_file(image_path)
+        self._execute_adapter(lambda adapter: adapter.image_click(resolved_path))
         return VisualActionResult(
             action=VisualActionKind.IMAGE_CLICK,
             success=True,
-            artifact_path=image_path,
+            artifact_path=str(resolved_path),
         ).to_robot_dict()
 
     def desktop_wait_image(
@@ -143,13 +146,17 @@ class SkuldBotVisualKeywords:
         """Wait until an image appears in the active graphical session."""
 
         require_visual_action(self._capabilities, VisualActionKind.WAIT_IMAGE)
-        self._require_existing_file(image_path)
-        backend = self._desktop_backend()
-        backend.wait_for_element(image_path, timeout=timeout_seconds)
+        resolved_path = self._require_existing_file(image_path)
+        self._execute_adapter(
+            lambda adapter: adapter.wait_image(
+                resolved_path,
+                timeout_seconds=timeout_seconds,
+            )
+        )
         return VisualActionResult(
             action=VisualActionKind.WAIT_IMAGE,
             success=True,
-            artifact_path=image_path,
+            artifact_path=str(resolved_path),
         ).to_robot_dict()
 
     def document_ocr_region(self, image_path: str, region: str | None = None) -> dict[str, Any]:
@@ -161,15 +168,19 @@ class SkuldBotVisualKeywords:
             "document.ocr requires provider-backed OCR integration before execution."
         )
 
-    def _desktop_backend(self) -> Any:
+    @staticmethod
+    def _adapter() -> RpaDesktopVisualAdapter:
         try:
-            from RPA.Desktop import Desktop
-        except ImportError as exc:
-            raise VisualActionError(
-                "RPA.Desktop is required for visual desktop actions."
-            ) from exc
+            return RpaDesktopVisualAdapter()
+        except VisualAdapterError as exc:
+            raise VisualActionError(str(exc)) from exc
 
-        return Desktop()
+    @classmethod
+    def _execute_adapter(cls, operation: Any) -> Any:
+        try:
+            return operation(cls._adapter())
+        except VisualAdapterError as exc:
+            raise VisualActionError(str(exc)) from exc
 
     @staticmethod
     def _ensure_output_path(output_path: str) -> Path:
@@ -180,6 +191,8 @@ class SkuldBotVisualKeywords:
         return path
 
     @staticmethod
-    def _require_existing_file(path: str) -> None:
-        if not Path(path).expanduser().is_file():
+    def _require_existing_file(path: str) -> Path:
+        resolved_path = Path(path).expanduser()
+        if not resolved_path.is_file():
             raise VisualActionError(f"File not found: {path}")
+        return resolved_path

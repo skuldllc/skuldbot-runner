@@ -11,6 +11,7 @@ from skuldbot_runner.models import (
     GraphicalDisplayState,
     VisualActionKind,
 )
+from skuldbot_runner.visual_adapter import VisualArtifact
 from skuldbot_runner.visual_keywords import (
     VisualActionError,
     VisualActionResult,
@@ -72,6 +73,8 @@ def test_visual_action_result_uses_orchestrator_field_names():
         action=VisualActionKind.SCREENSHOT,
         success=True,
         artifact_path="/tmp/run/screen.png",
+        checksum_sha256="abc123",
+        size_bytes=42,
         message="captured",
     )
 
@@ -79,5 +82,20 @@ def test_visual_action_result_uses_orchestrator_field_names():
         "action": "screenshot",
         "success": True,
         "artifactPath": "/tmp/run/screen.png",
+        "checksumSha256": "abc123",
+        "sizeBytes": 42,
         "message": "captured",
     }
+
+
+def test_visual_artifact_computes_checksum_and_size(tmp_path):
+    artifact_path = tmp_path / "frame.bin"
+    artifact_path.write_bytes(b"skuldbot-frame")
+
+    artifact = VisualArtifact.from_file(artifact_path)
+
+    assert artifact.path == str(artifact_path)
+    assert artifact.size_bytes == 14
+    assert artifact.checksum_sha256 == (
+        "f3d1d3cb4773b0ead078710ee812a1033dc750f9265b190dc77c0bd25a6bbfce"
+    )
