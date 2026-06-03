@@ -15,6 +15,7 @@ from .models import (
     GraphicalRunnerCapabilities,
     VisualActionKind,
 )
+from .ocr_provider import OcrProviderConfig, OcrProviderError, ProviderBackedOcrClient
 from .visual_adapter import RpaDesktopVisualAdapter, VisualAdapterError
 
 DISPLAY_READY_STATES = {
@@ -160,13 +161,21 @@ class SkuldBotVisualKeywords:
         ).to_robot_dict()
 
     def document_ocr_region(self, image_path: str, region: str | None = None) -> dict[str, Any]:
-        """Reject OCR execution until provider-backed OCR is wired."""
+        """Extract text through the configured provider-backed OCR integration."""
 
         require_visual_action(self._capabilities, VisualActionKind.OCR_REGION)
-        self._require_existing_file(image_path)
-        raise VisualActionError(
-            "document.ocr requires provider-backed OCR integration before execution."
-        )
+        resolved_path = self._require_existing_file(image_path)
+        try:
+            result = ProviderBackedOcrClient(
+                OcrProviderConfig.from_environment()
+            ).ocr_region(resolved_path, region=region)
+        except OcrProviderError as exc:
+            raise VisualActionError(str(exc)) from exc
+
+        payload = result.to_robot_dict()
+        payload["action"] = VisualActionKind.OCR_REGION.value
+        payload["success"] = True
+        return payload
 
     @staticmethod
     def _adapter() -> RpaDesktopVisualAdapter:
