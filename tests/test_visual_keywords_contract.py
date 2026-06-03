@@ -4,11 +4,15 @@
 import pytest
 
 from skuldbot_runner.graphical_runtime import (
+    DisplayLeaseRuntimeContext,
     GraphicalProbeInput,
     build_graphical_capabilities,
 )
 from skuldbot_runner.models import (
+    DisplayLeaseState,
     GraphicalDisplayState,
+    GraphicalRuntimePlane,
+    GraphicalSessionMode,
     VisualActionKind,
 )
 from skuldbot_runner.visual_adapter import VisualArtifact
@@ -30,9 +34,34 @@ def _ready_capabilities():
     return capability
 
 
+def _active_lease(*actions: VisualActionKind) -> DisplayLeaseRuntimeContext:
+    return DisplayLeaseRuntimeContext(
+        lease_id="lease-1",
+        run_id="run-1",
+        state=DisplayLeaseState.GRANTED,
+        runtime_plane=GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY,
+        mode=GraphicalSessionMode.ATTENDED,
+        required_visual_actions=actions or (VisualActionKind.SCREENSHOT,),
+    )
+
+
+def test_visual_action_requires_active_display_lease():
+    with pytest.raises(VisualActionError, match="Display lease is required"):
+        require_visual_action(_ready_capabilities(), VisualActionKind.SCREENSHOT, None)
+
+
+def test_visual_action_rejects_lease_without_action_grant():
+    with pytest.raises(VisualActionError, match="not granted"):
+        require_visual_action(
+            _ready_capabilities(),
+            VisualActionKind.IMAGE_CLICK,
+            _active_lease(VisualActionKind.SCREENSHOT),
+        )
+
+
 def test_visual_action_requires_declared_graphical_capability():
     with pytest.raises(VisualActionError, match="Graphical capability is required"):
-        require_visual_action(None, VisualActionKind.SCREENSHOT)
+        require_visual_action(None, VisualActionKind.SCREENSHOT, _active_lease())
 
 
 def test_visual_action_rejects_locked_display():
@@ -45,7 +74,7 @@ def test_visual_action_rejects_locked_display():
     assert capability is not None
 
     with pytest.raises(VisualActionError, match="not available"):
-        require_visual_action(capability, VisualActionKind.SCREENSHOT)
+        require_visual_action(capability, VisualActionKind.SCREENSHOT, _active_lease())
 
 
 def test_visual_action_rejects_non_ready_display_state():
@@ -53,7 +82,7 @@ def test_visual_action_rejects_non_ready_display_state():
     capability.display.state = GraphicalDisplayState.STALE
 
     with pytest.raises(VisualActionError, match="stale"):
-        require_visual_action(capability, VisualActionKind.SCREENSHOT)
+        require_visual_action(capability, VisualActionKind.SCREENSHOT, _active_lease())
 
 
 def test_visual_action_rejects_undeclared_action():
@@ -61,11 +90,19 @@ def test_visual_action_rejects_undeclared_action():
     capability.supported_visual_actions = [VisualActionKind.SCREENSHOT]
 
     with pytest.raises(VisualActionError, match="not declared"):
-        require_visual_action(capability, VisualActionKind.IMAGE_CLICK)
+        require_visual_action(
+            capability,
+            VisualActionKind.IMAGE_CLICK,
+            _active_lease(VisualActionKind.IMAGE_CLICK),
+        )
 
 
 def test_visual_action_allows_declared_ready_action():
-    require_visual_action(_ready_capabilities(), VisualActionKind.SCREENSHOT)
+    require_visual_action(
+        _ready_capabilities(),
+        VisualActionKind.SCREENSHOT,
+        _active_lease(),
+    )
 
 
 def test_visual_action_result_uses_orchestrator_field_names():

@@ -15,6 +15,11 @@ from .api_client import OrchestratorClient
 from .config import RunnerConfig
 from .executor import BotExecutor
 from .graphical_runtime import detect_graphical_capabilities
+from .linux_virtual_display import (
+    LinuxVirtualDisplaySession,
+    config_from_environment,
+    should_start_linux_virtual_display,
+)
 from .models import (
     HeartbeatRequest,
     Job,
@@ -53,6 +58,7 @@ class RunnerAgent:
         self.runner_id: str | None = None
         self.running = False
         self.current_job: Job | None = None
+        self._linux_virtual_display: LinuxVirtualDisplaySession | None = None
 
     async def start(self):
         """Start the runner agent."""
@@ -66,6 +72,8 @@ class RunnerAgent:
         self.running = True
 
         try:
+            self._start_linux_virtual_display_if_requested()
+
             # Register if we don't have an API key
             if not self.config.api_key:
                 await self._register()
@@ -91,8 +99,22 @@ class RunnerAgent:
 
     async def _cleanup(self):
         """Cleanup resources."""
+        if self._linux_virtual_display is not None:
+            self._linux_virtual_display.stop()
+            self._linux_virtual_display = None
         await self.client.close()
         logger.info("Runner agent stopped")
+
+    def _start_linux_virtual_display_if_requested(self) -> None:
+        """Start an explicitly requested Linux virtual display before registration."""
+
+        if not should_start_linux_virtual_display():
+            return
+
+        session = LinuxVirtualDisplaySession(config_from_environment())
+        session.start()
+        self._linux_virtual_display = session
+        logger.info("Linux virtual display started", display=session.config.display)
 
     async def _register(self):
         """Register this runner with the Orchestrator."""

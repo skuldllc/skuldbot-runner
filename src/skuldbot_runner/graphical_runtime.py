@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .models import (
+    DisplayLease,
+    DisplayLeaseState,
     DisplayResolution,
     GraphicalDisplayState,
     GraphicalDisplayStateInfo,
@@ -27,6 +29,14 @@ DEFAULT_STALE_AFTER_SECONDS = 30
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _WINDOWS_INTERACTIVE_SESSIONS = ("console", "rdp-tcp")
+ACTIVE_DISPLAY_LEASE_STATES = {DisplayLeaseState.GRANTED, DisplayLeaseState.ACTIVE}
+
+LEASE_ENV_LEASE_ID = "SKULDBOT_DISPLAY_LEASE_ID"
+LEASE_ENV_RUN_ID = "SKULDBOT_DISPLAY_LEASE_RUN_ID"
+LEASE_ENV_STATE = "SKULDBOT_DISPLAY_LEASE_STATE"
+LEASE_ENV_RUNTIME_PLANE = "SKULDBOT_DISPLAY_LEASE_RUNTIME_PLANE"
+LEASE_ENV_SESSION_MODE = "SKULDBOT_DISPLAY_LEASE_SESSION_MODE"
+LEASE_ENV_ACTIONS = "SKULDBOT_DISPLAY_LEASE_ACTIONS"
 
 
 @dataclass(frozen=True)
@@ -40,6 +50,25 @@ class GraphicalProbeInput:
     dpi_scale: float | None = None
 
 
+@dataclass(frozen=True)
+class DisplayLeaseRuntimeContext:
+    """Display lease facts read from the runner execution environment."""
+
+    lease_id: str
+    run_id: str
+    state: DisplayLeaseState
+    runtime_plane: GraphicalRuntimePlane
+    mode: GraphicalSessionMode
+    required_visual_actions: tuple[VisualActionKind, ...]
+
+    @property
+    def is_active(self) -> bool:
+        return self.state in ACTIVE_DISPLAY_LEASE_STATES
+
+    def allows(self, action: VisualActionKind) -> bool:
+        return action in self.required_visual_actions
+
+
 def detect_graphical_capabilities() -> GraphicalRunnerCapabilities | None:
     """Detect this process' graphical capability from local host signals."""
 
@@ -48,6 +77,48 @@ def detect_graphical_capabilities() -> GraphicalRunnerCapabilities | None:
             platform_system=platform.system(),
             environment=os.environ,
         ),
+    )
+
+
+def build_display_lease_environment(lease: DisplayLease) -> dict[str, str]:
+    """Build environment variables that bind visual keywords to a granted lease."""
+
+    return {
+        LEASE_ENV_LEASE_ID: lease.lease_id,
+        LEASE_ENV_RUN_ID: lease.request.run_id,
+        LEASE_ENV_STATE: lease.state.value,
+        LEASE_ENV_RUNTIME_PLANE: lease.request.runtime_plane.value,
+        LEASE_ENV_SESSION_MODE: lease.request.mode.value,
+        LEASE_ENV_ACTIONS: ",".join(
+            action.value for action in lease.request.required_visual_actions
+        ),
+        "SKULDBOT_GRAPHICAL_RUNTIME_PLANE": lease.request.runtime_plane.value,
+    }
+
+
+def read_display_lease_context(
+    environment: Mapping[str, str] | None = None,
+) -> DisplayLeaseRuntimeContext | None:
+    """Read the active display lease context from process environment variables."""
+
+    env = environment or os.environ
+    lease_id = env.get(LEASE_ENV_LEASE_ID, "").strip()
+    run_id = env.get(LEASE_ENV_RUN_ID, "").strip()
+    state = _read_display_lease_state(env.get(LEASE_ENV_STATE))
+    runtime_plane = _read_runtime_plane(env.get(LEASE_ENV_RUNTIME_PLANE))
+    mode = _read_session_mode(env.get(LEASE_ENV_SESSION_MODE))
+    actions = _read_visual_actions(env.get(LEASE_ENV_ACTIONS))
+
+    if not lease_id or not run_id or state is None or runtime_plane is None or mode is None:
+        return None
+
+    return DisplayLeaseRuntimeContext(
+        lease_id=lease_id,
+        run_id=run_id,
+        state=state,
+        runtime_plane=runtime_plane,
+        mode=mode,
+        required_visual_actions=tuple(actions),
     )
 
 
@@ -203,6 +274,39 @@ def _read_runtime_plane(value: str | None) -> GraphicalRuntimePlane | None:
         return GraphicalRuntimePlane(value.strip())
     except ValueError:
         return None
+
+
+def _read_session_mode(value: str | None) -> GraphicalSessionMode | None:
+    if not value:
+        return None
+
+    try:
+        return GraphicalSessionMode(value.strip())
+    except ValueError:
+        return None
+
+
+def _read_display_lease_state(value: str | None) -> DisplayLeaseState | None:
+    if not value:
+        return None
+
+    try:
+        return DisplayLeaseState(value.strip())
+    except ValueError:
+        return None
+
+
+def _read_visual_actions(value: str | None) -> list[VisualActionKind]:
+    if not value:
+        return []
+
+    actions: list[VisualActionKind] = []
+    for item in value.split(","):
+        try:
+            actions.append(VisualActionKind(item.strip()))
+        except ValueError:
+            continue
+    return actions
 
 
 def _read_bool(value: str | None) -> bool:

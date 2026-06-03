@@ -72,6 +72,18 @@ class GraphicalDisplayState(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class DisplayLeaseState(str, Enum):
+    """Display lease states accepted by the Orchestrator contract."""
+
+    REQUESTED = "requested"
+    GRANTED = "granted"
+    ACTIVE = "active"
+    HITL_HOLD = "hitl_hold"
+    RELEASED = "released"
+    EXPIRED = "expired"
+    FAILED = "failed"
+
+
 class VisualActionKind(str, Enum):
     """Visual action kinds supported by graphical runner capabilities."""
 
@@ -100,13 +112,20 @@ class GraphicalDisplayStateInfo(BaseModel):
     locked: bool
     connected: bool
     resolution: DisplayResolution
-    dpi_scale: float = Field(serialization_alias="dpiScale")
+    dpi_scale: float = Field(alias="dpiScale", serialization_alias="dpiScale")
     active_window_title: str | None = Field(
         default=None,
         serialization_alias="activeWindowTitle",
     )
-    last_frame_at: str | None = Field(default=None, serialization_alias="lastFrameAt")
-    stale_after_seconds: int = Field(serialization_alias="staleAfterSeconds")
+    last_frame_at: str | None = Field(
+        default=None,
+        alias="lastFrameAt",
+        serialization_alias="lastFrameAt",
+    )
+    stale_after_seconds: int = Field(
+        alias="staleAfterSeconds",
+        serialization_alias="staleAfterSeconds",
+    )
 
 
 class GraphicalRunnerCapabilities(BaseModel):
@@ -130,6 +149,94 @@ class GraphicalRunnerCapabilities(BaseModel):
         serialization_alias="currentGraphicalSessions",
     )
     installed_systems: list[str] = Field(serialization_alias="installedSystems")
+
+
+class SessionCredentialRef(BaseModel):
+    """Reference to a session credential resolved by the Orchestrator."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    secret_ref_key: str = Field(alias="secretRefKey", serialization_alias="secretRefKey")
+    required_at_step: str = Field(
+        alias="requiredAtStep",
+        serialization_alias="requiredAtStep",
+    )
+    data_classes: list[str] = Field(
+        default_factory=list,
+        alias="dataClasses",
+        serialization_alias="dataClasses",
+    )
+
+
+class GraphicalSession(BaseModel):
+    """Graphical session granted by the Orchestrator."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId", serialization_alias="sessionId")
+    tenant_id: str = Field(alias="tenantId", serialization_alias="tenantId")
+    runner_id: str = Field(alias="runnerId", serialization_alias="runnerId")
+    runtime_plane: GraphicalRuntimePlane = Field(
+        alias="runtimePlane",
+        serialization_alias="runtimePlane",
+    )
+    mode: GraphicalSessionMode
+    display: GraphicalDisplayStateInfo
+    acquired_at: str = Field(alias="acquiredAt", serialization_alias="acquiredAt")
+    expires_at: str | None = Field(
+        default=None,
+        alias="expiresAt",
+        serialization_alias="expiresAt",
+    )
+
+
+class DisplayLeaseRequest(BaseModel):
+    """Display lease request embedded in a granted display lease."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    lease_request_id: str = Field(
+        alias="leaseRequestId",
+        serialization_alias="leaseRequestId",
+    )
+    tenant_id: str = Field(alias="tenantId", serialization_alias="tenantId")
+    run_id: str = Field(alias="runId", serialization_alias="runId")
+    step_id: str = Field(alias="stepId", serialization_alias="stepId")
+    runtime_plane: GraphicalRuntimePlane = Field(
+        alias="runtimePlane",
+        serialization_alias="runtimePlane",
+    )
+    mode: GraphicalSessionMode
+    required_capabilities: list[str] = Field(
+        default_factory=list,
+        alias="requiredCapabilities",
+        serialization_alias="requiredCapabilities",
+    )
+    required_visual_actions: list[VisualActionKind] = Field(
+        default_factory=list,
+        alias="requiredVisualActions",
+        serialization_alias="requiredVisualActions",
+    )
+    session_credential_refs: list[SessionCredentialRef] = Field(
+        default_factory=list,
+        alias="sessionCredentialRefs",
+        serialization_alias="sessionCredentialRefs",
+    )
+    reason: str
+
+
+class DisplayLease(BaseModel):
+    """Display lease granted by Orchestrator and required for visual actions."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    lease_id: str = Field(alias="leaseId", serialization_alias="leaseId")
+    request: DisplayLeaseRequest
+    state: DisplayLeaseState
+    runner_id: str = Field(alias="runnerId", serialization_alias="runnerId")
+    session: GraphicalSession
+    granted_at: str = Field(alias="grantedAt", serialization_alias="grantedAt")
+    expires_at: str = Field(alias="expiresAt", serialization_alias="expiresAt")
 
 
 # ============================================
@@ -262,6 +369,7 @@ class Job(BaseModel):
     bot_name: str = "unknown-bot"
     package_url: str | None = None
     plan: dict[str, Any] | None = None
+    display_lease: DisplayLease | None = None
     inputs: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -287,6 +395,7 @@ class Job(BaseModel):
         inputs = payload.get("inputs", {})
         if not isinstance(inputs, Mapping):
             inputs = {}
+        raw_display_lease = payload.get("displayLease") or payload.get("display_lease")
 
         bot_id = (
             payload.get("bot_id")
@@ -319,6 +428,11 @@ class Job(BaseModel):
                 or payload.get("botPackageUrl")
             ),
             plan=plan if isinstance(plan, Mapping) else None,
+            display_lease=(
+                DisplayLease.model_validate(raw_display_lease)
+                if isinstance(raw_display_lease, Mapping)
+                else None
+            ),
             inputs=dict(inputs),
             created_at=_parse_datetime(created_at),
         )

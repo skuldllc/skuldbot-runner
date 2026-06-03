@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .graphical_runtime import detect_graphical_capabilities
+from .graphical_runtime import (
+    DisplayLeaseRuntimeContext,
+    detect_graphical_capabilities,
+    read_display_lease_context,
+)
 from .models import (
     GraphicalDisplayState,
     GraphicalRunnerCapabilities,
@@ -53,8 +57,24 @@ class VisualActionResult:
 def require_visual_action(
     capabilities: GraphicalRunnerCapabilities | None,
     action: VisualActionKind,
+    lease_context: DisplayLeaseRuntimeContext | None,
 ) -> None:
     """Fail closed unless the current runner explicitly supports this action."""
+
+    if lease_context is None:
+        raise VisualActionError(
+            f"Display lease is required for visual action {action.value}."
+        )
+
+    if not lease_context.is_active:
+        raise VisualActionError(
+            f"Display lease {lease_context.lease_id} is not active."
+        )
+
+    if not lease_context.allows(action):
+        raise VisualActionError(
+            f"Visual action {action.value} is not granted by display lease."
+        )
 
     if capabilities is None:
         raise VisualActionError(
@@ -80,6 +100,16 @@ def require_visual_action(
             f"Visual action {action.value} is not declared by this runner."
         )
 
+    if lease_context.runtime_plane not in capabilities.supported_runtime_planes:
+        raise VisualActionError(
+            f"Runtime plane {lease_context.runtime_plane.value} is not declared by this runner."
+        )
+
+    if lease_context.mode not in capabilities.supported_session_modes:
+        raise VisualActionError(
+            f"Session mode {lease_context.mode.value} is not declared by this runner."
+        )
+
 
 class SkuldBotVisualKeywords:
     """Robot Framework keyword library for SkuldBot visual desktop actions."""
@@ -88,11 +118,16 @@ class SkuldBotVisualKeywords:
 
     def __init__(self) -> None:
         self._capabilities = detect_graphical_capabilities()
+        self._lease_context = read_display_lease_context()
 
     def desktop_screenshot(self, output_path: str) -> dict[str, Any]:
         """Capture a screenshot of the active graphical display."""
 
-        require_visual_action(self._capabilities, VisualActionKind.SCREENSHOT)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.SCREENSHOT,
+            self._lease_context,
+        )
         resolved_path = self._ensure_output_path(output_path)
         artifact = self._execute_adapter(lambda adapter: adapter.screenshot(resolved_path))
         return VisualActionResult(
@@ -106,7 +141,11 @@ class SkuldBotVisualKeywords:
     def desktop_type_text(self, text: str) -> dict[str, Any]:
         """Type text into the active graphical session."""
 
-        require_visual_action(self._capabilities, VisualActionKind.TYPE_TEXT)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.TYPE_TEXT,
+            self._lease_context,
+        )
         self._execute_adapter(lambda adapter: adapter.type_text(text))
         return VisualActionResult(
             action=VisualActionKind.TYPE_TEXT,
@@ -117,7 +156,11 @@ class SkuldBotVisualKeywords:
     def desktop_hotkey(self, *keys: str) -> dict[str, Any]:
         """Send a hotkey combination to the active graphical session."""
 
-        require_visual_action(self._capabilities, VisualActionKind.HOTKEY)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.HOTKEY,
+            self._lease_context,
+        )
         if not keys:
             raise VisualActionError("At least one key is required.")
         self._execute_adapter(lambda adapter: adapter.hotkey(tuple(keys)))
@@ -130,7 +173,11 @@ class SkuldBotVisualKeywords:
     def desktop_image_click(self, image_path: str) -> dict[str, Any]:
         """Click the first matching image in the active graphical session."""
 
-        require_visual_action(self._capabilities, VisualActionKind.IMAGE_CLICK)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.IMAGE_CLICK,
+            self._lease_context,
+        )
         resolved_path = self._require_existing_file(image_path)
         self._execute_adapter(lambda adapter: adapter.image_click(resolved_path))
         return VisualActionResult(
@@ -146,7 +193,11 @@ class SkuldBotVisualKeywords:
     ) -> dict[str, Any]:
         """Wait until an image appears in the active graphical session."""
 
-        require_visual_action(self._capabilities, VisualActionKind.WAIT_IMAGE)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.WAIT_IMAGE,
+            self._lease_context,
+        )
         resolved_path = self._require_existing_file(image_path)
         self._execute_adapter(
             lambda adapter: adapter.wait_image(
@@ -163,7 +214,11 @@ class SkuldBotVisualKeywords:
     def document_ocr_region(self, image_path: str, region: str | None = None) -> dict[str, Any]:
         """Extract text through the configured provider-backed OCR integration."""
 
-        require_visual_action(self._capabilities, VisualActionKind.OCR_REGION)
+        require_visual_action(
+            self._capabilities,
+            VisualActionKind.OCR_REGION,
+            self._lease_context,
+        )
         resolved_path = self._require_existing_file(image_path)
         try:
             result = ProviderBackedOcrClient(

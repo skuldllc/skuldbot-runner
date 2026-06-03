@@ -9,19 +9,42 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 import structlog
 
 from .config import RunnerConfig
-from .models import Job, RunResult, RunStatus, StepProgress, LogEntry, LogLevel
+from .graphical_runtime import build_display_lease_environment
+from .models import Job, LogEntry, LogLevel, RunResult, RunStatus, StepProgress
 
 logger = structlog.get_logger()
 
 # Type for progress callback
 ProgressCallback = Callable[[StepProgress | LogEntry], Awaitable[None]]
+
+
+@contextmanager
+def display_lease_environment(job: Job):
+    """Expose a granted display lease only for the active runtime execution."""
+
+    if job.display_lease is None:
+        yield
+        return
+
+    lease_environment = build_display_lease_environment(job.display_lease)
+    previous_values = {key: os.environ.get(key) for key in lease_environment}
+    os.environ.update(lease_environment)
+    try:
+        yield
+    finally:
+        for key, previous_value in previous_values.items():
+            if previous_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_value
 
 
 class BotExecutor:
@@ -44,7 +67,11 @@ class BotExecutor:
         logs: list[str] = []
         artifacts: list[str] = []
 
-        async def emit_log(message: str, level: LogLevel = LogLevel.INFO, node_id: str | None = None):
+        async def emit_log(
+            message: str,
+            level: LogLevel = LogLevel.INFO,
+            node_id: str | None = None,
+        ):
             """Emit a log entry to the progress callback."""
             log_entry = LogEntry(
                 run_id=job.id,
@@ -76,13 +103,14 @@ class BotExecutor:
             await emit_log("Starting runtime execution...")
             RuntimeExecutor, RuntimeExecutionMode = self._resolve_runtime_executor()
             runtime = RuntimeExecutor(mode=RuntimeExecutionMode.PRODUCTION)
-            runtime_result = runtime.run_from_package(
-                str(extract_dir),
-                variables=job.inputs,
-                execution_id=job.id,
-                bot_id=job.bot_id or job.id,
-                bot_name=job.bot_name,
-            )
+            with display_lease_environment(job):
+                runtime_result = runtime.run_from_package(
+                    str(extract_dir),
+                    variables=job.inputs,
+                    execution_id=job.id,
+                    bot_id=job.bot_id or job.id,
+                    bot_name=job.bot_name,
+                )
 
             # 6. Parse results
             completed_at = datetime.utcnow()
@@ -274,7 +302,9 @@ class BotExecutor:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            raise TimeoutError(f"Robot execution timed out after {self.config.job_timeout_seconds}s")
+            raise TimeoutError(
+                f"Robot execution timed out after {self.config.job_timeout_seconds}s"
+            )
 
         # Parse output.xml for detailed results
         output_xml = output_dir / "output.xml"
@@ -355,7 +385,8 @@ class BotExecutor:
     def _resolve_runtime_executor(self):
         """Import Executor from the separated executor runtime package."""
         try:
-            from skuldbot import Executor, ExecutionMode
+            from skuldbot import ExecutionMode, Executor
+
             return Executor, ExecutionMode
         except ImportError:
             env_path = os.environ.get("SKULDBOT_EXECUTOR_PY_PATH")
@@ -366,7 +397,8 @@ class BotExecutor:
                     if candidate_str not in sys.path:
                         sys.path.insert(0, candidate_str)
                     try:
-                        from skuldbot import Executor, ExecutionMode
+                        from skuldbot import ExecutionMode, Executor
+
                         return Executor, ExecutionMode
                     except ImportError:
                         pass

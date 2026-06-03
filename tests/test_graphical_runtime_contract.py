@@ -3,9 +3,13 @@
 
 from skuldbot_runner.graphical_runtime import (
     GraphicalProbeInput,
+    build_display_lease_environment,
     build_graphical_capabilities,
+    read_display_lease_context,
 )
 from skuldbot_runner.models import (
+    DisplayLease,
+    DisplayLeaseState,
     GraphicalDisplayState,
     GraphicalRuntimePlane,
     GraphicalSessionMode,
@@ -27,6 +31,61 @@ def _system_info() -> SystemInfo:
         memory_total_mb=32768,
         memory_available_mb=16384,
     )
+
+
+def _display_lease() -> DisplayLease:
+    return DisplayLease.model_validate(
+        {
+            "leaseId": "lease-1",
+            "state": "granted",
+            "runnerId": "runner-1",
+            "grantedAt": "2026-06-03T10:00:00Z",
+            "expiresAt": "2026-06-03T10:10:00Z",
+            "request": {
+                "leaseRequestId": "lease-request-1",
+                "tenantId": "tenant-1",
+                "runId": "run-1",
+                "stepId": "step-1",
+                "runtimePlane": "linux_virtual_display",
+                "mode": "unattended",
+                "requiredCapabilities": ["meditech"],
+                "requiredVisualActions": ["screenshot", "ocr_region"],
+                "sessionCredentialRefs": [],
+                "reason": "visual runtime",
+            },
+            "session": {
+                "sessionId": "session-1",
+                "tenantId": "tenant-1",
+                "runnerId": "runner-1",
+                "runtimePlane": "linux_virtual_display",
+                "mode": "unattended",
+                "acquiredAt": "2026-06-03T10:00:00Z",
+                "display": {
+                    "state": "active",
+                    "locked": False,
+                    "connected": True,
+                    "resolution": {"width": 1280, "height": 720},
+                    "dpiScale": 1.0,
+                    "staleAfterSeconds": 30,
+                },
+            },
+        }
+    )
+
+
+def test_display_lease_environment_round_trip():
+    environment = build_display_lease_environment(_display_lease())
+
+    context = read_display_lease_context(environment)
+
+    assert context is not None
+    assert context.lease_id == "lease-1"
+    assert context.run_id == "run-1"
+    assert context.state is DisplayLeaseState.GRANTED
+    assert context.runtime_plane is GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
+    assert context.mode is GraphicalSessionMode.UNATTENDED
+    assert context.allows(VisualActionKind.SCREENSHOT)
+    assert context.allows(VisualActionKind.OCR_REGION)
 
 
 def test_no_display_signal_declares_no_graphical_capability():
