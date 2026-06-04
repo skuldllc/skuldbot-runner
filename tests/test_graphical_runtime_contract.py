@@ -133,7 +133,80 @@ def test_linux_display_declares_linux_graphical_capability():
         GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
     ]
     assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
-    assert capability.installed_systems == ["meditech", "sap"]
+
+
+def test_linux_virtual_display_pool_declares_multi_session_capacity_without_global_display():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Linux",
+            environment={
+                "SKULDBOT_LINUX_VIRTUAL_DISPLAY_ENABLED": "true",
+                "SKULDBOT_GRAPHICAL_UNATTENDED": "true",
+            },
+            max_graphical_sessions=3,
+            current_graphical_sessions=2,
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_runtime_planes == [
+        GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
+    ]
+    assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
+    assert capability.max_graphical_sessions == 3
+    assert capability.current_graphical_sessions == 2
+
+
+def test_linux_shared_display_does_not_declare_multi_session_without_pool():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Linux",
+            environment={
+                "DISPLAY": ":1",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_interactive_does_not_declare_multi_session_without_session_pool():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_runtime_planes == [
+        GraphicalRuntimePlane.WINDOWS_INTERACTIVE
+    ]
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_runtime_planes == [
+        GraphicalRuntimePlane.WINDOWS_INTERACTIVE
+    ]
+    assert capability.max_graphical_sessions == 3
     assert VisualActionKind.IMAGE_CLICK in capability.supported_visual_actions
 
 

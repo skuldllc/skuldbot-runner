@@ -10,7 +10,8 @@ import platform
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 
@@ -31,6 +32,15 @@ class LinuxVirtualDisplayConfig:
     @property
     def screen_geometry(self) -> str:
         return f"{self.width}x{self.height}x{self.depth}"
+
+
+@dataclass(frozen=True)
+class LinuxVirtualDisplayLease:
+    """An isolated Linux virtual display assigned to a single run."""
+
+    run_id: str
+    display: str
+    environment: dict[str, str]
 
 
 def should_start_linux_virtual_display(
@@ -66,6 +76,30 @@ def config_from_environment(
         )
         or 3.0,
     )
+
+
+def display_number(display: str) -> int:
+    """Return the numeric X display id for deterministic per-run allocation."""
+
+    value = display.strip()
+    if not value.startswith(":"):
+        raise LinuxVirtualDisplayError(f"Invalid X display value: {display}")
+    number = value[1:].split(".", 1)[0]
+    try:
+        parsed = int(number)
+    except ValueError as exc:
+        raise LinuxVirtualDisplayError(f"Invalid X display value: {display}") from exc
+    if parsed <= 0:
+        raise LinuxVirtualDisplayError(f"Invalid X display value: {display}")
+    return parsed
+
+
+def display_for_slot(base_display: str, slot: int) -> str:
+    """Build a display id from a base display and zero-based slot."""
+
+    if slot < 0:
+        raise LinuxVirtualDisplayError("Display slot must be zero or greater.")
+    return f":{display_number(base_display) + slot}"
 
 
 def build_xvfb_command(config: LinuxVirtualDisplayConfig) -> list[str]:
@@ -174,6 +208,77 @@ class LinuxVirtualDisplaySession:
             check=False,
         )
         return result.returncode == 0
+
+
+class LinuxVirtualDisplayPool:
+    """Owns isolated Xvfb sessions for concurrent graphical runs."""
+
+    def __init__(
+        self,
+        base_config: LinuxVirtualDisplayConfig,
+        max_sessions: int,
+        base_environment: Mapping[str, str] | None = None,
+    ) -> None:
+        if max_sessions < 1:
+            raise LinuxVirtualDisplayError("max_sessions must be at least 1.")
+        self.base_config = base_config
+        self.max_sessions = max_sessions
+        self.base_environment = dict(base_environment or os.environ)
+        self._available_slots: list[int] = list(range(max_sessions))
+        self._sessions: dict[str, LinuxVirtualDisplaySession] = {}
+        self._leases: dict[str, LinuxVirtualDisplayLease] = {}
+
+    @property
+    def active_count(self) -> int:
+        return len(self._sessions)
+
+    @contextmanager
+    def acquire(self, run_id: str) -> Iterator[LinuxVirtualDisplayLease]:
+        """Start an isolated Xvfb display for one run and release it afterwards."""
+
+        if run_id in self._sessions:
+            raise LinuxVirtualDisplayError(f"Run {run_id} already has a display lease.")
+        if not self._available_slots:
+            raise LinuxVirtualDisplayError("No Linux virtual display slots are available.")
+
+        slot = self._available_slots.pop(0)
+        display = display_for_slot(self.base_config.display, slot)
+        environment = dict(self.base_environment)
+        config = LinuxVirtualDisplayConfig(
+            display=display,
+            width=self.base_config.width,
+            height=self.base_config.height,
+            depth=self.base_config.depth,
+            startup_timeout_seconds=self.base_config.startup_timeout_seconds,
+        )
+        session = LinuxVirtualDisplaySession(config, environment=environment)
+        lease = LinuxVirtualDisplayLease(
+            run_id=run_id,
+            display=display,
+            environment=environment,
+        )
+
+        try:
+            session.start()
+            self._sessions[run_id] = session
+            self._leases[run_id] = lease
+            yield lease
+        finally:
+            self._leases.pop(run_id, None)
+            active_session = self._sessions.pop(run_id, None)
+            if active_session is not None:
+                active_session.stop()
+            self._available_slots.append(slot)
+            self._available_slots.sort()
+
+    def stop_all(self) -> None:
+        """Stop every active Xvfb session owned by this pool."""
+
+        for run_id in list(self._sessions):
+            session = self._sessions.pop(run_id)
+            session.stop()
+        self._leases.clear()
+        self._available_slots = list(range(self.max_sessions))
 
 
 def _read_bool(value: str | None) -> bool:

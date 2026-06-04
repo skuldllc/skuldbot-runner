@@ -3,8 +3,7 @@
 
 import os
 
-from skuldbot_runner.executor import display_lease_environment
-from skuldbot_runner.graphical_runtime import read_display_lease_context
+from skuldbot_runner.executor import BotExecutor
 from skuldbot_runner.models import DisplayLease, Job
 
 
@@ -48,19 +47,17 @@ def _display_lease() -> DisplayLease:
     )
 
 
-def test_executor_display_lease_environment_is_scoped():
-    job = Job(
-        id="run-1",
-        display_lease=_display_lease(),
+def test_runtime_worker_environment_is_derived_without_mutating_process_environment():
+    executor = BotExecutor.__new__(BotExecutor)
+    job = Job(id="run-1", display_lease=_display_lease())
+
+    os.environ.pop("DISPLAY", None)
+    env = executor._build_runtime_worker_environment(
+        job,
+        execution_environment={"DISPLAY": ":101"},
     )
 
-    assert read_display_lease_context({}) is None
-    assert os.environ.get("SKULDBOT_DISPLAY_LEASE_ID") is None
-
-    with display_lease_environment(job):
-        context = read_display_lease_context()
-        assert context is not None
-        assert context.lease_id == "lease-1"
-        assert context.run_id == "run-1"
-
+    assert env["DISPLAY"] == ":101"
+    assert env["SKULDBOT_DISPLAY_LEASE_ID"] == "lease-1"
+    assert os.environ.get("DISPLAY") is None
     assert os.environ.get("SKULDBOT_DISPLAY_LEASE_ID") is None

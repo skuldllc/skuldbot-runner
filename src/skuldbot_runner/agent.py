@@ -4,6 +4,8 @@
 """Main runner agent - the "dumb" worker that polls and executes."""
 
 import asyncio
+import os
+import platform
 import signal
 import tempfile
 from datetime import datetime
@@ -14,13 +16,14 @@ import structlog
 from .api_client import OrchestratorClient
 from .config import RunnerConfig
 from .executor import BotExecutor
-from .graphical_runtime import detect_graphical_capabilities
+from .graphical_runtime import GraphicalProbeInput, build_graphical_capabilities
 from .linux_virtual_display import (
-    LinuxVirtualDisplaySession,
+    LinuxVirtualDisplayPool,
     config_from_environment,
     should_start_linux_virtual_display,
 )
 from .models import (
+    GraphicalRuntimePlane,
     HeartbeatRequest,
     Job,
     LogEntry,
@@ -58,7 +61,9 @@ class RunnerAgent:
         self.runner_id: str | None = None
         self.running = False
         self.current_job: Job | None = None
-        self._linux_virtual_display: LinuxVirtualDisplaySession | None = None
+        self._active_jobs: dict[str, Job] = {}
+        self._job_tasks: set[asyncio.Task[None]] = set()
+        self._linux_virtual_display_pool: LinuxVirtualDisplayPool | None = None
 
     async def start(self):
         """Start the runner agent."""
@@ -72,7 +77,7 @@ class RunnerAgent:
         self.running = True
 
         try:
-            self._start_linux_virtual_display_if_requested()
+            self._configure_linux_virtual_display_pool_if_requested()
 
             # Register if we don't have an API key
             if not self.config.api_key:
@@ -99,22 +104,28 @@ class RunnerAgent:
 
     async def _cleanup(self):
         """Cleanup resources."""
-        if self._linux_virtual_display is not None:
-            self._linux_virtual_display.stop()
-            self._linux_virtual_display = None
+        if self._job_tasks:
+            await asyncio.gather(*self._job_tasks, return_exceptions=True)
+        if self._linux_virtual_display_pool is not None:
+            self._linux_virtual_display_pool.stop_all()
+            self._linux_virtual_display_pool = None
         await self.client.close()
         logger.info("Runner agent stopped")
 
-    def _start_linux_virtual_display_if_requested(self) -> None:
-        """Start an explicitly requested Linux virtual display before registration."""
+    def _configure_linux_virtual_display_pool_if_requested(self) -> None:
+        """Prepare isolated Xvfb sessions when linux_virtual_display is enabled."""
 
         if not should_start_linux_virtual_display():
             return
 
-        session = LinuxVirtualDisplaySession(config_from_environment())
-        session.start()
-        self._linux_virtual_display = session
-        logger.info("Linux virtual display started", display=session.config.display)
+        self._linux_virtual_display_pool = LinuxVirtualDisplayPool(
+            base_config=config_from_environment(),
+            max_sessions=self.config.max_graphical_sessions,
+        )
+        logger.info(
+            "Linux virtual display pool configured",
+            max_sessions=self.config.max_graphical_sessions,
+        )
 
     async def _register(self):
         """Register this runner with the Orchestrator."""
@@ -125,7 +136,7 @@ class RunnerAgent:
             labels=self.config.labels,
             capabilities=self.config.capabilities,
             system_info=system_info,
-            graphical_capabilities=detect_graphical_capabilities(),
+            graphical_capabilities=self._detect_graphical_capabilities(),
         )
 
         response = await self.client.register(request)
@@ -151,10 +162,10 @@ class RunnerAgent:
                 system_info = get_system_info()
 
                 request = HeartbeatRequest(
-                    status="busy" if self.current_job else "online",
-                    current_run_id=self.current_job.id if self.current_job else None,
+                    status="busy" if self._active_jobs else "online",
+                    current_run_id=next(iter(self._active_jobs), None),
                     system_info=system_info,
-                    graphical_capabilities=detect_graphical_capabilities(),
+                    graphical_capabilities=self._detect_graphical_capabilities(),
                 )
 
                 await self.client.heartbeat(request)
@@ -169,8 +180,7 @@ class RunnerAgent:
         """Poll for jobs and execute them."""
         while self.running:
             try:
-                # Don't poll if we're already running a job
-                if self.current_job is None:
+                if len(self._active_jobs) < self.config.max_concurrent_jobs:
                     await self._check_for_jobs()
 
             except Exception as e:
@@ -188,13 +198,20 @@ class RunnerAgent:
 
         logger.info("Found pending jobs", count=len(jobs))
 
-        # Try to claim the first job
+        # Claim up to the remaining local capacity. Orchestrator still owns final routing.
+        remaining_capacity = self.config.max_concurrent_jobs - len(self._active_jobs)
         for job in jobs:
+            if remaining_capacity <= 0:
+                break
+
             claim_response = await self.client.claim_job(job.id)
 
             if claim_response.success and claim_response.job:
-                await self._execute_job(claim_response.job)
-                break
+                claimed_job = claim_response.job
+                task = asyncio.create_task(self._execute_job(claimed_job))
+                self._job_tasks.add(task)
+                task.add_done_callback(self._job_tasks.discard)
+                remaining_capacity -= 1
             else:
                 logger.debug(
                     "Failed to claim job",
@@ -204,7 +221,8 @@ class RunnerAgent:
 
     async def _execute_job(self, job: Job):
         """Execute a claimed job."""
-        self.current_job = job
+        self._active_jobs[job.id] = job
+        self.current_job = next(iter(self._active_jobs.values()), None)
         logger.info("Executing job", run_id=job.id, bot_name=job.bot_name)
 
         try:
@@ -215,11 +233,24 @@ class RunnerAgent:
             package_path = await self._download_package(job)
 
             # Execute with real-time log streaming
-            result = await self.executor.execute(
-                job=job,
-                package_path=package_path,
-                on_progress=lambda entry: self._handle_progress(entry),
-            )
+            if self._requires_linux_virtual_display(job):
+                if self._linux_virtual_display_pool is None:
+                    raise RuntimeError(
+                        "Run requires linux_virtual_display but no display pool is configured."
+                    )
+                with self._linux_virtual_display_pool.acquire(job.id) as display_lease:
+                    result = await self.executor.execute(
+                        job=job,
+                        package_path=package_path,
+                        execution_environment=display_lease.environment,
+                        on_progress=lambda entry: self._handle_progress(entry, job.id),
+                    )
+            else:
+                result = await self.executor.execute(
+                    job=job,
+                    package_path=package_path,
+                    on_progress=lambda entry: self._handle_progress(entry, job.id),
+                )
 
             # Report completion
             await self.client.complete_run(result)
@@ -251,7 +282,8 @@ class RunnerAgent:
             )
 
         finally:
-            self.current_job = None
+            self._active_jobs.pop(job.id, None)
+            self.current_job = next(iter(self._active_jobs.values()), None)
 
     async def _download_package(self, job: Job) -> str:
         """Download bot package to temp file."""
@@ -268,7 +300,7 @@ class RunnerAgent:
             f"Run {job.id} has no package URL. Runner requires pre-built .skb package dispatch."
         )
 
-    async def _handle_progress(self, entry: LogEntry | StepProgress):
+    async def _handle_progress(self, entry: LogEntry | StepProgress, run_id: str):
         """Handle progress updates from executor - either logs or step progress."""
         try:
             if isinstance(entry, LogEntry):
@@ -278,7 +310,7 @@ class RunnerAgent:
                 # Send step progress
                 await self.client.report_progress(
                     ProgressReport(
-                        run_id=entry.run_id if hasattr(entry, 'run_id') else self.current_job.id,
+                        run_id=entry.run_id or run_id,
                         status=RunStatus.RUNNING,
                         steps=[entry],
                     )
@@ -286,3 +318,24 @@ class RunnerAgent:
         except Exception as e:
             # Don't fail execution if progress reporting fails
             logger.debug("Failed to send progress", error=str(e))
+
+    def _detect_graphical_capabilities(self):
+        pool = self._linux_virtual_display_pool
+        return build_graphical_capabilities(
+            GraphicalProbeInput(
+                platform_system=platform.system(),
+                environment=os.environ,
+                max_graphical_sessions=(
+                    pool.max_sessions if pool is not None else self.config.max_graphical_sessions
+                ),
+                current_graphical_sessions=pool.active_count if pool is not None else 0,
+            )
+        )
+
+    @staticmethod
+    def _requires_linux_virtual_display(job: Job) -> bool:
+        return (
+            job.display_lease is not None
+            and job.display_lease.request.runtime_plane
+            == GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
+        )

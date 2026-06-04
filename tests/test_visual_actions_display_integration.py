@@ -3,10 +3,11 @@
 
 import os
 import shutil
+from contextlib import contextmanager
 
 import pytest
 
-from skuldbot_runner.executor import display_lease_environment
+from skuldbot_runner.graphical_runtime import build_display_lease_environment
 from skuldbot_runner.linux_virtual_display import (
     LinuxVirtualDisplayConfig,
     LinuxVirtualDisplaySession,
@@ -16,6 +17,25 @@ from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
 
 RUN_DISPLAY_TESTS = os.environ.get("SKULDBOT_VISUAL_ACTION_INTEGRATION") == "1"
 RUN_XVFB_TESTS = os.environ.get("SKULDBOT_XVFB_VISUAL_ACTION_INTEGRATION") == "1"
+
+
+@contextmanager
+def display_lease_environment(job: Job):
+    lease_environment = (
+        build_display_lease_environment(job.display_lease)
+        if job.display_lease is not None
+        else {}
+    )
+    previous_values = {key: os.environ.get(key) for key in lease_environment}
+    os.environ.update(lease_environment)
+    try:
+        yield
+    finally:
+        for key, previous_value in previous_values.items():
+            if previous_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous_value
 
 
 def _display_lease(*actions: str) -> DisplayLease:

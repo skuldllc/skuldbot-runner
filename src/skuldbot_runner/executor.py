@@ -4,12 +4,12 @@
 """Bot package executor using Robot Framework."""
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -26,27 +26,6 @@ logger = structlog.get_logger()
 ProgressCallback = Callable[[StepProgress | LogEntry], Awaitable[None]]
 
 
-@contextmanager
-def display_lease_environment(job: Job):
-    """Expose a granted display lease only for the active runtime execution."""
-
-    if job.display_lease is None:
-        yield
-        return
-
-    lease_environment = build_display_lease_environment(job.display_lease)
-    previous_values = {key: os.environ.get(key) for key in lease_environment}
-    os.environ.update(lease_environment)
-    try:
-        yield
-    finally:
-        for key, previous_value in previous_values.items():
-            if previous_value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous_value
-
-
 class BotExecutor:
     """Executes bot packages using Robot Framework."""
 
@@ -59,6 +38,7 @@ class BotExecutor:
         self,
         job: Job,
         package_path: str,
+        execution_environment: dict[str, str] | None = None,
         on_progress: ProgressCallback | None = None,
     ) -> RunResult:
         """Execute a bot package and return the result."""
@@ -101,16 +81,11 @@ class BotExecutor:
 
             # 3. Execute through shared runtime package (skuldbot-executor)
             await emit_log("Starting runtime execution...")
-            RuntimeExecutor, RuntimeExecutionMode = self._resolve_runtime_executor()
-            runtime = RuntimeExecutor(mode=RuntimeExecutionMode.PRODUCTION)
-            with display_lease_environment(job):
-                runtime_result = runtime.run_from_package(
-                    str(extract_dir),
-                    variables=job.inputs,
-                    execution_id=job.id,
-                    bot_id=job.bot_id or job.id,
-                    bot_name=job.bot_name,
-                )
+            runtime_result = await self._run_runtime_worker(
+                job=job,
+                extract_dir=extract_dir,
+                execution_environment=execution_environment,
+            )
 
             # 6. Parse results
             completed_at = datetime.utcnow()
@@ -123,14 +98,21 @@ class BotExecutor:
 
             runtime_logs = getattr(runtime_result, "logs", []) or []
             for log_entry in runtime_logs:
-                message = getattr(log_entry, "message", str(log_entry))
+                message = (
+                    log_entry.get("message", str(log_entry))
+                    if isinstance(log_entry, dict)
+                    else getattr(log_entry, "message", str(log_entry))
+                )
                 if message:
                     logs.append(message)
 
             runtime_errors = getattr(runtime_result, "errors", []) or []
             runtime_error_message = None
             if runtime_errors:
-                runtime_error_message = "; ".join(str(e.get("message", e)) for e in runtime_errors)
+                runtime_error_message = "; ".join(
+                    str(e.get("message", e)) if isinstance(e, dict) else str(e)
+                    for e in runtime_errors
+                )
 
             runtime_success = bool(getattr(runtime_result, "success", False))
 
@@ -382,28 +364,86 @@ class BotExecutor:
 
         return None
 
-    def _resolve_runtime_executor(self):
-        """Import Executor from the separated executor runtime package."""
-        try:
-            from skuldbot import ExecutionMode, Executor
+    async def _run_runtime_worker(
+        self,
+        job: Job,
+        extract_dir: Path,
+        execution_environment: dict[str, str] | None,
+    ) -> Any:
+        """Run the execution runtime in an isolated subprocess."""
 
-            return Executor, ExecutionMode
-        except ImportError:
-            env_path = os.environ.get("SKULDBOT_EXECUTOR_PY_PATH")
-            if env_path:
-                candidate = Path(env_path).expanduser()
-                if (candidate / "skuldbot").exists():
-                    candidate_str = str(candidate)
-                    if candidate_str not in sys.path:
-                        sys.path.insert(0, candidate_str)
-                    try:
-                        from skuldbot import ExecutionMode, Executor
+        result_path = extract_dir / "runtime-result.json"
+        inputs_path = extract_dir / "runtime-inputs.json"
+        inputs_path.write_text(json.dumps(job.inputs), encoding="utf-8")
 
-                        return Executor, ExecutionMode
-                    except ImportError:
-                        pass
+        env = self._build_runtime_worker_environment(job, execution_environment)
 
-        raise RuntimeError(
-            "Runtime package `skuldbot-executor` not found. "
-            "Set SKULDBOT_EXECUTOR_PY_PATH or install the package in runner environment."
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "skuldbot_runner.runtime_worker",
+            "--package-dir",
+            str(extract_dir),
+            "--inputs-json",
+            str(inputs_path),
+            "--result-json",
+            str(result_path),
+            "--execution-id",
+            job.id,
+            "--bot-id",
+            job.bot_id or job.id,
+            "--bot-name",
+            job.bot_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self.config.job_timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise TimeoutError(
+                f"Runtime worker timed out after {self.config.job_timeout_seconds}s"
+            ) from exc
+        if process.returncode != 0:
+            stderr_text = stderr.decode("utf-8", errors="replace").strip()
+            stdout_text = stdout.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                "Runtime worker failed: "
+                f"{stderr_text or stdout_text or f'exit {process.returncode}'}"
+            )
+
+        if not result_path.exists():
+            raise RuntimeError("Runtime worker did not write a result file.")
+
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        return _RuntimeResult(payload)
+
+    def _build_runtime_worker_environment(
+        self,
+        job: Job,
+        execution_environment: dict[str, str] | None,
+    ) -> dict[str, str]:
+        """Build an isolated subprocess environment for one run."""
+
+        env = dict(os.environ)
+        if execution_environment:
+            env.update(execution_environment)
+        if job.display_lease is not None:
+            env.update(build_display_lease_environment(job.display_lease))
+        return env
+
+
+class _RuntimeResult:
+    """Attribute wrapper for the JSON payload produced by the runtime worker."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.success = bool(payload.get("success", False))
+        self.output = payload.get("output", {}) or {}
+        self.logs = payload.get("logs", []) or []
+        self.errors = payload.get("errors", []) or []
