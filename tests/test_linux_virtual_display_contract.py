@@ -102,6 +102,37 @@ def test_linux_virtual_display_slots_are_isolated_and_deterministic():
     assert display_for_slot(":100", 2) == ":102"
 
 
+def test_linux_virtual_display_respects_explicit_empty_environments(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("SKULDBOT_LINUX_VIRTUAL_DISPLAY_ENABLED", "true")
+
+    assert (
+        should_start_linux_virtual_display(
+            {},
+            platform_system="Linux",
+        )
+        is False
+    )
+
+    monkeypatch.setenv("DISPLAY", ":55")
+    monkeypatch.setenv("SKULDBOT_LINUX_VIRTUAL_DISPLAY", ":56")
+    monkeypatch.setenv("SKULDBOT_DISPLAY_WIDTH", "1600")
+    config = config_from_environment({})
+    session_environment: dict[str, str] = {}
+    session = LinuxVirtualDisplaySession(config, environment=session_environment)
+    pool = LinuxVirtualDisplayPool(
+        base_config=config,
+        max_sessions=1,
+        base_environment={},
+    )
+
+    assert config.display == ":99"
+    assert config.width == 1280
+    assert session.environment is session_environment
+    assert pool.base_environment == {}
+
+
 @pytest.mark.skipif(
     os.environ.get("SKULDBOT_XVFB_INTEGRATION") != "1",
     reason="Set SKULDBOT_XVFB_INTEGRATION=1 to start a real Xvfb process.",

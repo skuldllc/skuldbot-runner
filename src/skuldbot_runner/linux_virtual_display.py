@@ -49,7 +49,7 @@ def should_start_linux_virtual_display(
 ) -> bool:
     """Return true only when Xvfb was explicitly requested and no display exists."""
 
-    env = environment or os.environ
+    env = environment if environment is not None else os.environ
     system = (platform_system or platform.system()).lower()
     if system != "linux":
         return False
@@ -65,7 +65,7 @@ def config_from_environment(
 ) -> LinuxVirtualDisplayConfig:
     """Build Xvfb config from runner environment values."""
 
-    env = environment or os.environ
+    env = environment if environment is not None else os.environ
     return LinuxVirtualDisplayConfig(
         display=env.get("SKULDBOT_LINUX_VIRTUAL_DISPLAY", ":99").strip() or ":99",
         width=_read_positive_int(env.get("SKULDBOT_DISPLAY_WIDTH")) or 1280,
@@ -125,7 +125,7 @@ class LinuxVirtualDisplaySession:
         environment: MutableMapping[str, str] | None = None,
     ) -> None:
         self.config = config
-        self.environment = environment or os.environ
+        self.environment = environment if environment is not None else os.environ
         self._process: subprocess.Popen[str] | None = None
         self._previous_values: dict[str, str | None] = {}
 
@@ -223,7 +223,9 @@ class LinuxVirtualDisplayPool:
             raise LinuxVirtualDisplayError("max_sessions must be at least 1.")
         self.base_config = base_config
         self.max_sessions = max_sessions
-        self.base_environment = dict(base_environment or os.environ)
+        self.base_environment = dict(
+            base_environment if base_environment is not None else os.environ
+        )
         self._available_slots: list[int] = list(range(max_sessions))
         self._sessions: dict[str, LinuxVirtualDisplaySession] = {}
         self._leases: dict[str, LinuxVirtualDisplayLease] = {}
