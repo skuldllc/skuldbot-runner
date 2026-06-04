@@ -15,6 +15,7 @@ from skuldbot_runner.linux_virtual_display import (
     LinuxVirtualDisplaySession,
     build_xvfb_command,
     config_from_environment,
+    display_for_slot,
     should_start_linux_virtual_display,
 )
 from skuldbot_runner.models import GraphicalRuntimePlane, GraphicalSessionMode
@@ -72,6 +73,12 @@ def test_linux_virtual_display_config_reads_environment():
 
     assert config.display == ":92"
     assert config.screen_geometry == "1920x1080x24"
+
+
+def test_linux_virtual_display_slots_are_isolated_and_deterministic():
+    assert display_for_slot(":100", 0) == ":100"
+    assert display_for_slot(":100", 1) == ":101"
+    assert display_for_slot(":100", 2) == ":102"
 
 
 @pytest.mark.skipif(

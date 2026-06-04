@@ -48,6 +48,8 @@ class GraphicalProbeInput:
     screen_width: int | None = None
     screen_height: int | None = None
     dpi_scale: float | None = None
+    max_graphical_sessions: int | None = None
+    current_graphical_sessions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,8 +179,8 @@ def build_graphical_capabilities(
             VisualActionKind.TYPE_TEXT,
             VisualActionKind.HOTKEY,
         ],
-        max_graphical_sessions=1,
-        current_graphical_sessions=0,
+        max_graphical_sessions=_max_sessions_for(plane, env, probe.max_graphical_sessions),
+        current_graphical_sessions=probe.current_graphical_sessions or 0,
         installed_systems=_installed_systems(env),
     )
 
@@ -195,7 +197,11 @@ def _detect_runtime_plane(
     if system == "windows" and _has_windows_interactive_session(env):
         return GraphicalRuntimePlane.WINDOWS_INTERACTIVE
 
-    if system == "linux" and (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+    if system == "linux" and (
+        env.get("DISPLAY")
+        or env.get("WAYLAND_DISPLAY")
+        or _read_bool(env.get("SKULDBOT_LINUX_VIRTUAL_DISPLAY_ENABLED"))
+    ):
         return GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
 
     return None
@@ -215,7 +221,11 @@ def _explicit_plane_has_display(
         return _has_windows_interactive_session(env)
 
     if plane == GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY:
-        return bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+        return bool(
+            env.get("DISPLAY")
+            or env.get("WAYLAND_DISPLAY")
+            or _read_bool(env.get("SKULDBOT_LINUX_VIRTUAL_DISPLAY_ENABLED"))
+        )
 
     return False
 
@@ -258,6 +268,40 @@ def _supported_modes_for(
         return [GraphicalSessionMode.ATTENDED]
 
     return []
+
+
+def _max_sessions_for(
+    plane: GraphicalRuntimePlane,
+    env: Mapping[str, str],
+    requested_max: int | None,
+) -> int:
+    requested = requested_max or _read_int(env.get("SKULDBOT_MAX_GRAPHICAL_SESSIONS")) or 1
+    if requested < 1:
+        return 1
+
+    if plane == GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY:
+        if _read_bool(env.get("SKULDBOT_LINUX_VIRTUAL_DISPLAY_SESSION_POOL_ENABLED")):
+            return requested
+        if _read_bool(env.get("SKULDBOT_LINUX_VIRTUAL_DISPLAY_ENABLED")) and not (
+            env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")
+        ):
+            return requested
+        return 1
+
+    if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
+        if _read_bool(env.get("SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED")):
+            return requested
+        return 1
+
+    if plane in {
+        GraphicalRuntimePlane.REMOTE_DESKTOP,
+        GraphicalRuntimePlane.CITRIX_PUBLISHED_APP,
+    }:
+        if _read_bool(env.get("SKULDBOT_REMOTE_SESSION_POOL_ENABLED")):
+            return requested
+        return 1
+
+    return 1
 
 
 def _installed_systems(env: Mapping[str, str]) -> list[str]:

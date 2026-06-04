@@ -53,6 +53,10 @@ class RunnerConfig(BaseSettings):
         default=1,
         description="Maximum concurrent bot executions",
     )
+    max_graphical_sessions: int = Field(
+        default=1,
+        description="Maximum isolated graphical display sessions on this runner",
+    )
     job_timeout_seconds: int = Field(
         default=3600,
         description="Maximum time for a single job (seconds)",
