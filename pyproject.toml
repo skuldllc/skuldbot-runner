@@ -20,6 +20,7 @@ dependencies = [
     "skuldbot-executor>=0.1.0", # Runtime execution engine
     "robotframework>=7.0",    # Bot execution
     "rpaframework>=28.0.0",   # RPA libraries
+    "rpaframework-recognition>=5.0.0", # Image matching for visual desktop actions
     "python-dotenv>=1.0.0",   # Environment variables
     "structlog>=23.0.0",      # Structured logging
     "tenacity>=8.0.0",        # Retry logic

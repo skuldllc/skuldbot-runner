@@ -44,10 +44,24 @@ LABEL org.opencontainers.image.licenses="UNLICENSED"
 LABEL org.opencontainers.image.title="SkuldBot Runner"
 LABEL org.opencontainers.image.description="Agent that claims bot jobs from the Orchestrator and delegates execution to skuldbot-executor."
 
-# System deps (Robot Framework + RPA libs often need build essentials; add as
-# needed per telemetry. Keep minimal for now.)
+# System deps required by the linux_virtual_display graphical plane.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      libgl1 \
+      libglib2.0-0 \
+      libgtk-3-0 \
+      libsm6 \
+      libxext6 \
+      libxi6 \
+      libxrandr2 \
+      libxrender1 \
+      libxss1 \
+      libxtst6 \
+      scrot \
+      x11-utils \
+      xauth \
+      xvfb \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=compiler-wheels /wheels /wheels-compiler
