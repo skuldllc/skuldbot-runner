@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
-import pathlib
+from pathlib import Path
 
 import tomllib
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_visual_image_matching_dependency_is_required():
@@ -44,3 +44,16 @@ def test_runner_image_declares_linux_virtual_display_system_dependencies():
 
     missing = sorted(package for package in required_packages if package not in dockerfile)
     assert missing == []
+
+
+def test_runner_image_vendors_visual_recognition_wheels_for_offline_install():
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+
+    assert "AS visual-dependency-wheels" in dockerfile
+    assert (
+        'pip wheel --no-cache-dir --wheel-dir /wheels "rpaframework-recognition>=5.0.0"'
+        in dockerfile
+    )
+    assert "COPY --from=visual-dependency-wheels /wheels /wheels-visual" in dockerfile
+    assert "--find-links=/wheels-visual" in dockerfile
+    assert "find_spec('RPA.recognition')" in dockerfile
