@@ -1,15 +1,19 @@
 # Copyright (c) 2026 Skuld, LLC. All rights reserved.
 # Proprietary and confidential. Reverse engineering prohibited.
 
+import json
 import os
 import shutil
-from contextlib import contextmanager
+import subprocess
+import sys
+from contextlib import ExitStack, contextmanager
 
 import pytest
 
 from skuldbot_runner.graphical_runtime import build_display_lease_environment
 from skuldbot_runner.linux_virtual_display import (
     LinuxVirtualDisplayConfig,
+    LinuxVirtualDisplayPool,
     LinuxVirtualDisplaySession,
 )
 from skuldbot_runner.models import DisplayLease, Job
@@ -38,18 +42,18 @@ def display_lease_environment(job: Job):
                 os.environ[key] = previous_value
 
 
-def _display_lease(*actions: str) -> DisplayLease:
+def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> DisplayLease:
     return DisplayLease.model_validate(
         {
-            "leaseId": "lease-visual-integration",
+            "leaseId": f"lease-{run_id}",
             "state": "active",
             "runnerId": "runner-visual-integration",
             "grantedAt": "2026-06-03T10:00:00Z",
             "expiresAt": "2026-06-03T10:10:00Z",
             "request": {
-                "leaseRequestId": "lease-request-visual-integration",
+                "leaseRequestId": f"lease-request-{run_id}",
                 "tenantId": "tenant-visual-integration",
-                "runId": "run-visual-integration",
+                "runId": run_id,
                 "stepId": "step-visual-integration",
                 "runtimePlane": "linux_virtual_display",
                 "mode": "unattended",
@@ -144,3 +148,93 @@ def test_xvfb_display_executes_visual_keywords_with_lease(tmp_path):
     assert hotkey["success"] is True
     assert waited["success"] is True
     assert clicked["success"] is True
+
+
+VISUAL_RUNNER_SCRIPT = r"""
+import json
+import sys
+
+from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
+
+artifact_path = sys.argv[1]
+keywords = SkuldBotVisualKeywords()
+screenshot = keywords.desktop_screenshot(artifact_path)
+typed = keywords.desktop_type_text("SkuldBot high density")
+hotkey = keywords.desktop_hotkey("ctrl", "a")
+waited = keywords.desktop_wait_image(artifact_path, timeout_seconds=3)
+clicked = keywords.desktop_image_click(artifact_path)
+print(
+    json.dumps(
+        {
+            "screenshot": screenshot,
+            "typed": typed,
+            "hotkey": hotkey,
+            "waited": waited,
+            "clicked": clicked,
+        }
+    )
+)
+"""
+
+
+@pytest.mark.skipif(
+    not RUN_XVFB_TESTS,
+    reason="Set SKULDBOT_XVFB_VISUAL_ACTION_INTEGRATION=1 to run against real Xvfb.",
+)
+def test_xvfb_pool_runs_two_visual_jobs_with_isolated_evidence(tmp_path):
+    pytest.importorskip("RPA.Desktop")
+    if shutil.which("Xvfb") is None:
+        pytest.skip("Xvfb executable is not available.")
+
+    pool = LinuxVirtualDisplayPool(
+        base_config=LinuxVirtualDisplayConfig(
+            display=os.environ.get("SKULDBOT_XVFB_CONCURRENT_TEST_DISPLAY", ":130"),
+            startup_timeout_seconds=3.0,
+        ),
+        max_sessions=2,
+        base_environment={},
+    )
+    run_ids = ("run-xvfb-a", "run-xvfb-b")
+    actions = ("screenshot", "type_text", "hotkey", "image_click", "wait_image")
+
+    with ExitStack() as stack:
+        leases = [stack.enter_context(pool.acquire(run_id)) for run_id in run_ids]
+        processes: list[subprocess.Popen[str]] = []
+        artifact_paths = []
+
+        for run_id, lease in zip(run_ids, leases, strict=True):
+            artifact_path = tmp_path / run_id / "screen.png"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_paths.append(artifact_path)
+            display_lease = _display_lease(*actions, run_id=run_id)
+            env = dict(os.environ)
+            env.update(lease.environment)
+            env.update(build_display_lease_environment(display_lease))
+            processes.append(
+                subprocess.Popen(  # noqa: S603
+                    [sys.executable, "-c", VISUAL_RUNNER_SCRIPT, str(artifact_path)],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=15)
+            assert process.returncode == 0, stderr
+            results.append(json.loads(stdout))
+
+    assert leases[0].display != leases[1].display
+    assert artifact_paths[0] != artifact_paths[1]
+    for result, artifact_path in zip(results, artifact_paths, strict=True):
+        screenshot = result["screenshot"]
+        assert screenshot["success"] is True
+        assert screenshot["artifactPath"] == str(artifact_path)
+        assert screenshot["sizeBytes"] > 0
+        assert len(screenshot["checksumSha256"]) == 64
+        assert result["typed"]["success"] is True
+        assert result["hotkey"]["success"] is True
+        assert result["waited"]["success"] is True
+        assert result["clicked"]["success"] is True
