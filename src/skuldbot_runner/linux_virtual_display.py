@@ -232,6 +232,14 @@ class LinuxVirtualDisplayPool:
     def active_count(self) -> int:
         return len(self._sessions)
 
+    @property
+    def available_count(self) -> int:
+        return len(self._available_slots)
+
+    @property
+    def has_available_slot(self) -> bool:
+        return self.available_count > 0
+
     @contextmanager
     def acquire(self, run_id: str) -> Iterator[LinuxVirtualDisplayLease]:
         """Start an isolated Xvfb display for one run and release it afterwards."""
@@ -268,7 +276,8 @@ class LinuxVirtualDisplayPool:
             active_session = self._sessions.pop(run_id, None)
             if active_session is not None:
                 active_session.stop()
-            self._available_slots.append(slot)
+            if slot not in self._available_slots:
+                self._available_slots.append(slot)
             self._available_slots.sort()
 
     def stop_all(self) -> None:

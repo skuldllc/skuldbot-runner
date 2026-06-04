@@ -23,7 +23,6 @@ from .linux_virtual_display import (
     should_start_linux_virtual_display,
 )
 from .models import (
-    GraphicalRuntimePlane,
     HeartbeatRequest,
     Job,
     LogEntry,
@@ -32,6 +31,10 @@ from .models import (
     RunResult,
     RunStatus,
     StepProgress,
+)
+from .runner_capacity import (
+    job_requires_linux_virtual_display,
+    runner_can_claim_job_locally,
 )
 from .system_info import get_system_info
 
@@ -200,9 +203,40 @@ class RunnerAgent:
 
         # Claim up to the remaining local capacity. Orchestrator still owns final routing.
         remaining_capacity = self.config.max_concurrent_jobs - len(self._active_jobs)
+        active_graphical_jobs = sum(
+            1
+            for active_job in self._active_jobs.values()
+            if job_requires_linux_virtual_display(active_job)
+        )
+        active_graphical_sessions = (
+            self._linux_virtual_display_pool.active_count
+            if self._linux_virtual_display_pool is not None
+            else 0
+        )
+        reserved_linux_virtual_display_slots = max(
+            active_graphical_jobs - active_graphical_sessions,
+            0,
+        )
         for job in jobs:
             if remaining_capacity <= 0:
                 break
+
+            active_jobs_for_capacity = (
+                self.config.max_concurrent_jobs - remaining_capacity
+            )
+            if not runner_can_claim_job_locally(
+                job,
+                active_jobs=active_jobs_for_capacity,
+                max_concurrent_jobs=self.config.max_concurrent_jobs,
+                linux_virtual_display_pool=self._linux_virtual_display_pool,
+                reserved_linux_virtual_display_slots=reserved_linux_virtual_display_slots,
+            ):
+                logger.debug(
+                    "Skipping job until local runner capacity is available",
+                    job_id=job.id,
+                    requires_linux_virtual_display=job_requires_linux_virtual_display(job),
+                )
+                continue
 
             claim_response = await self.client.claim_job(job.id)
 
@@ -212,6 +246,8 @@ class RunnerAgent:
                 self._job_tasks.add(task)
                 task.add_done_callback(self._job_tasks.discard)
                 remaining_capacity -= 1
+                if job_requires_linux_virtual_display(claimed_job):
+                    reserved_linux_virtual_display_slots += 1
             else:
                 logger.debug(
                     "Failed to claim job",
@@ -334,8 +370,4 @@ class RunnerAgent:
 
     @staticmethod
     def _requires_linux_virtual_display(job: Job) -> bool:
-        return (
-            job.display_lease is not None
-            and job.display_lease.request.runtime_plane
-            == GraphicalRuntimePlane.LINUX_VIRTUAL_DISPLAY
-        )
+        return job_requires_linux_virtual_display(job)

@@ -3,6 +3,8 @@
 
 import os
 import shutil
+import subprocess
+from contextlib import ExitStack
 
 import pytest
 
@@ -12,6 +14,9 @@ from skuldbot_runner.graphical_runtime import (
 )
 from skuldbot_runner.linux_virtual_display import (
     LinuxVirtualDisplayConfig,
+    LinuxVirtualDisplayError,
+    LinuxVirtualDisplayLease,
+    LinuxVirtualDisplayPool,
     LinuxVirtualDisplaySession,
     build_xvfb_command,
     config_from_environment,
@@ -19,6 +24,22 @@ from skuldbot_runner.linux_virtual_display import (
     should_start_linux_virtual_display,
 )
 from skuldbot_runner.models import GraphicalRuntimePlane, GraphicalSessionMode
+
+
+def _assert_x_display_ready(lease: LinuxVirtualDisplayLease) -> None:
+    if shutil.which("xdpyinfo") is None:
+        return
+
+    probe_env = dict(os.environ)
+    probe_env.update(lease.environment)
+    result = subprocess.run(  # noqa: S603
+        ["xdpyinfo"],
+        env=probe_env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    assert result.returncode == 0
 
 
 def test_linux_virtual_display_starts_only_when_explicitly_requested():
@@ -113,3 +134,96 @@ def test_linux_virtual_display_starts_real_xvfb_and_declares_capability():
         assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
     finally:
         session.stop()
+
+
+@pytest.mark.skipif(
+    os.environ.get("SKULDBOT_XVFB_INTEGRATION") != "1",
+    reason="Set SKULDBOT_XVFB_INTEGRATION=1 to start real isolated Xvfb sessions.",
+)
+def test_linux_virtual_display_pool_runs_isolated_concurrent_sessions():
+    if shutil.which("Xvfb") is None:
+        pytest.skip("Xvfb executable is not available.")
+
+    pool = LinuxVirtualDisplayPool(
+        base_config=LinuxVirtualDisplayConfig(
+            display=os.environ.get("SKULDBOT_XVFB_POOL_TEST_DISPLAY", ":100"),
+            startup_timeout_seconds=3.0,
+        ),
+        max_sessions=2,
+        base_environment={},
+    )
+
+    with ExitStack() as stack:
+        lease_a = stack.enter_context(pool.acquire("run-a"))
+        lease_b = stack.enter_context(pool.acquire("run-b"))
+        first_display = lease_a.display
+
+        assert lease_a.display != lease_b.display
+        assert lease_a.environment["DISPLAY"] == lease_a.display
+        assert lease_b.environment["DISPLAY"] == lease_b.display
+        assert pool.active_count == 2
+        assert pool.available_count == 0
+        _assert_x_display_ready(lease_a)
+        _assert_x_display_ready(lease_b)
+
+        with pytest.raises(
+            LinuxVirtualDisplayError,
+            match="No Linux virtual display slots are available",
+        ):
+            with pool.acquire("run-c"):
+                pass
+
+        with pytest.raises(
+            LinuxVirtualDisplayError,
+            match="Run run-a already has a display lease",
+        ):
+            with pool.acquire("run-a"):
+                pass
+
+    assert pool.active_count == 0
+    assert pool.available_count == 2
+
+    with pool.acquire("run-c") as lease_c:
+        assert lease_c.display == first_display
+        _assert_x_display_ready(lease_c)
+
+    assert pool.active_count == 0
+    assert pool.available_count == 2
+
+
+@pytest.mark.skipif(
+    os.environ.get("SKULDBOT_XVFB_INTEGRATION") != "1",
+    reason="Set SKULDBOT_XVFB_INTEGRATION=1 to start real isolated Xvfb sessions.",
+)
+def test_linux_virtual_display_pool_stop_all_releases_active_sessions_once():
+    if shutil.which("Xvfb") is None:
+        pytest.skip("Xvfb executable is not available.")
+
+    pool = LinuxVirtualDisplayPool(
+        base_config=LinuxVirtualDisplayConfig(
+            display=os.environ.get("SKULDBOT_XVFB_POOL_STOP_TEST_DISPLAY", ":110"),
+            startup_timeout_seconds=3.0,
+        ),
+        max_sessions=2,
+        base_environment={},
+    )
+    lease_a_context = pool.acquire("run-a")
+    lease_b_context = pool.acquire("run-b")
+
+    lease_a = lease_a_context.__enter__()
+    lease_b = lease_b_context.__enter__()
+    try:
+        assert lease_a.display != lease_b.display
+        assert pool.active_count == 2
+        assert pool.available_count == 0
+
+        pool.stop_all()
+
+        assert pool.active_count == 0
+        assert pool.available_count == 2
+    finally:
+        lease_b_context.__exit__(None, None, None)
+        lease_a_context.__exit__(None, None, None)
+
+    assert pool.active_count == 0
+    assert pool.available_count == 2
