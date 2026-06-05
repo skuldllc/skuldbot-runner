@@ -19,6 +19,11 @@ import structlog
 from .config import RunnerConfig
 from .graphical_runtime import build_display_lease_environment
 from .models import Job, LogEntry, LogLevel, RunResult, RunStatus, StepProgress
+from .staging_artifacts import (
+    STAGING_MANIFEST_ENV,
+    STAGING_ROOT_ENV,
+    cleanup_uploaded_staging_artifacts,
+)
 
 logger = structlog.get_logger()
 
@@ -163,6 +168,7 @@ class BotExecutor:
             )
 
         finally:
+            self._cleanup_uploaded_staging(job)
             # Cleanup (optional - keep for debugging)
             if os.environ.get("SKULDBOT_CLEANUP_RUNS", "true").lower() == "true":
                 self._cleanup(run_dir)
@@ -432,11 +438,35 @@ class BotExecutor:
         """Build an isolated subprocess environment for one run."""
 
         env = dict(os.environ)
+        staging_dir = self._staging_dir_for(job)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        env[STAGING_ROOT_ENV] = str(staging_dir)
+        env[STAGING_MANIFEST_ENV] = str(self._staging_manifest_for(job))
         if execution_environment:
             env.update(execution_environment)
         if job.display_lease is not None:
             env.update(build_display_lease_environment(job.display_lease))
         return env
+
+    def _staging_dir_for(self, job: Job) -> Path:
+        return self.work_dir / job.id / "evidence-staging"
+
+    def _staging_manifest_for(self, job: Job) -> Path:
+        return self._staging_dir_for(job) / "uploaded-artifacts.jsonl"
+
+    def _cleanup_uploaded_staging(self, job: Job) -> None:
+        staging_dir = self._staging_dir_for(job)
+        result = cleanup_uploaded_staging_artifacts(
+            manifest_path=self._staging_manifest_for(job),
+            allowed_roots=[staging_dir],
+        )
+        if result.deleted or result.skipped:
+            logger.info(
+                "Cleaned evidence staging artifacts",
+                run_id=job.id,
+                deleted=result.deleted,
+                skipped=result.skipped,
+            )
 
 
 class _RuntimeResult:

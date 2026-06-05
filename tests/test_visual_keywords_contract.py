@@ -160,3 +160,39 @@ def test_visual_artifact_upload_fails_closed_without_orchestrator(monkeypatch, t
             checksum_sha256="abc123",
             mime_type="application/octet-stream",
         )
+
+
+def test_visual_artifact_cleanup_requires_evidence_staging_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED", "true")
+    monkeypatch.delenv("SKULDBOT_EVIDENCE_STAGING_ROOT", raising=False)
+
+    artifact_path = tmp_path / "screen.png"
+    artifact_path.write_bytes(b"screen")
+    keywords = SkuldBotVisualKeywords()
+    keywords._lease_context = _active_lease(VisualActionKind.SCREENSHOT)
+
+    with pytest.raises(VisualActionError, match="STAGING_ROOT"):
+        keywords._upload_artifact(
+            action=VisualActionKind.SCREENSHOT,
+            artifact_path=artifact_path,
+            checksum_sha256="abc123",
+            mime_type="image/png",
+            cleanup_staging=True,
+        )
+
+
+def test_visual_references_cannot_live_in_evidence_staging(monkeypatch, tmp_path):
+    staging_root = tmp_path / "evidence-staging"
+    reference_root = tmp_path / "reference-assets"
+    staging_root.mkdir()
+    reference_root.mkdir()
+    staged_reference = staging_root / "button.png"
+    safe_reference = reference_root / "button.png"
+    staged_reference.write_bytes(b"button")
+    safe_reference.write_bytes(b"button")
+    monkeypatch.setenv("SKULDBOT_EVIDENCE_STAGING_ROOT", str(staging_root))
+
+    SkuldBotVisualKeywords._require_reference_outside_staging(safe_reference)
+
+    with pytest.raises(VisualActionError, match="outside the evidence staging"):
+        SkuldBotVisualKeywords._require_reference_outside_staging(staged_reference)

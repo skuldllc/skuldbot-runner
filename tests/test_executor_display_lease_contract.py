@@ -47,8 +47,9 @@ def _display_lease() -> DisplayLease:
     )
 
 
-def test_runtime_worker_environment_is_derived_without_mutating_process_environment():
+def test_runtime_worker_environment_is_derived_without_mutating_process_environment(tmp_path):
     executor = BotExecutor.__new__(BotExecutor)
+    executor.work_dir = tmp_path
     job = Job(id="run-1", display_lease=_display_lease())
 
     os.environ.pop("DISPLAY", None)
@@ -59,5 +60,12 @@ def test_runtime_worker_environment_is_derived_without_mutating_process_environm
 
     assert env["DISPLAY"] == ":101"
     assert env["SKULDBOT_DISPLAY_LEASE_ID"] == "lease-1"
+    assert env["SKULDBOT_EVIDENCE_STAGING_ROOT"] == str(
+        tmp_path / "run-1" / "evidence-staging"
+    )
+    assert env["SKULDBOT_EVIDENCE_STAGING_MANIFEST"] == str(
+        tmp_path / "run-1" / "evidence-staging" / "uploaded-artifacts.jsonl"
+    )
     assert os.environ.get("DISPLAY") is None
     assert os.environ.get("SKULDBOT_DISPLAY_LEASE_ID") is None
+    assert os.environ.get("SKULDBOT_EVIDENCE_STAGING_ROOT") is None
