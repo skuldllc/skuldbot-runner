@@ -8,9 +8,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
+
+LOCAL_OUTPUT_PATH_KEYS = {
+    "log_html",
+    "output_xml",
+    "report_html",
+}
+WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/].+")
 
 
 def main() -> int:
@@ -56,12 +64,50 @@ def main() -> int:
 def _serialize_runtime_result(result: Any) -> dict[str, Any]:
     return {
         "success": bool(getattr(result, "success", False)),
-        "output": getattr(result, "output", {}) or {},
+        "output": _sanitize_runtime_output(getattr(result, "output", {}) or {}),
         "logs": [_serialize_log(entry) for entry in (getattr(result, "logs", []) or [])],
         "errors": [
             _serialize_error(error) for error in (getattr(result, "errors", []) or [])
         ],
     }
+
+
+def _sanitize_runtime_output(value: Any) -> Any:
+    """Remove local filesystem paths from run outputs before completion."""
+
+    sanitized = _sanitize_output_value(value, key=None)
+    return sanitized if isinstance(sanitized, dict) else {}
+
+
+def _sanitize_output_value(value: Any, key: str | None) -> Any:
+    if key in LOCAL_OUTPUT_PATH_KEYS:
+        return None
+
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for child_key, child_value in value.items():
+            sanitized = _sanitize_output_value(child_value, key=str(child_key))
+            if sanitized is not None:
+                result[str(child_key)] = sanitized
+        return result
+
+    if isinstance(value, list):
+        result = []
+        for child_value in value:
+            sanitized = _sanitize_output_value(child_value, key=None)
+            if sanitized is not None:
+                result.append(sanitized)
+        return result
+
+    if isinstance(value, str) and _looks_like_local_path(value):
+        return None
+
+    return value
+
+
+def _looks_like_local_path(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.startswith("/") or bool(WINDOWS_ABSOLUTE_PATH.match(stripped))
 
 
 def _serialize_log(entry: Any) -> dict[str, str]:
