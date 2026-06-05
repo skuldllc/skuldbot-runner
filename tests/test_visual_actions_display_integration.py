@@ -23,6 +23,11 @@ RUN_DISPLAY_TESTS = os.environ.get("SKULDBOT_VISUAL_ACTION_INTEGRATION") == "1"
 RUN_XVFB_TESTS = os.environ.get("SKULDBOT_XVFB_VISUAL_ACTION_INTEGRATION") == "1"
 
 
+@pytest.fixture(autouse=True)
+def disable_provider_backed_upload_for_display_adapter_tests(monkeypatch):
+    monkeypatch.setenv("SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED", "false")
+
+
 @contextmanager
 def display_lease_environment(job: Job):
     lease_environment = (

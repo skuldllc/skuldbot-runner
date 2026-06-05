@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .artifact_uploader import (
+    ArtifactUploadError,
+    OrchestratorArtifactUploader,
+    artifact_upload_required,
+)
 from .graphical_runtime import (
     DisplayLeaseRuntimeContext,
     detect_graphical_capabilities,
@@ -38,18 +43,26 @@ class VisualActionResult:
 
     action: VisualActionKind
     success: bool
+    artifact_id: str | None = None
     artifact_path: str | None = None
     checksum_sha256: str | None = None
     size_bytes: int | None = None
+    mime_type: str | None = None
+    classification: str | None = None
+    redaction_applied: bool | None = None
     message: str | None = None
 
     def to_robot_dict(self) -> dict[str, Any]:
         return {
             "action": self.action.value,
             "success": self.success,
+            "artifactId": self.artifact_id,
             "artifactPath": self.artifact_path,
             "checksumSha256": self.checksum_sha256,
             "sizeBytes": self.size_bytes,
+            "mimeType": self.mime_type,
+            "classification": self.classification,
+            "redactionApplied": self.redaction_applied,
             "message": self.message,
         }
 
@@ -130,12 +143,22 @@ class SkuldBotVisualKeywords:
         )
         resolved_path = self._ensure_output_path(output_path)
         artifact = self._execute_adapter(lambda adapter: adapter.screenshot(resolved_path))
+        uploaded = self._upload_artifact(
+            action=VisualActionKind.SCREENSHOT,
+            artifact_path=Path(artifact.path),
+            checksum_sha256=artifact.checksum_sha256,
+            mime_type="image/png",
+        )
         return VisualActionResult(
             action=VisualActionKind.SCREENSHOT,
             success=True,
-            artifact_path=artifact.path,
+            artifact_id=uploaded.artifact_id if uploaded else None,
+            artifact_path=None if uploaded else artifact.path,
             checksum_sha256=artifact.checksum_sha256,
             size_bytes=artifact.size_bytes,
+            mime_type=uploaded.mime_type if uploaded else "image/png",
+            classification=uploaded.classification if uploaded else None,
+            redaction_applied=uploaded.redaction_applied if uploaded else None,
         ).to_robot_dict()
 
     def desktop_type_text(self, text: str) -> dict[str, Any]:
@@ -230,6 +253,17 @@ class SkuldBotVisualKeywords:
         payload = result.to_robot_dict()
         payload["action"] = VisualActionKind.OCR_REGION.value
         payload["success"] = True
+        uploaded = self._upload_artifact(
+            action=VisualActionKind.OCR_REGION,
+            artifact_path=Path(result.source_artifact.path),
+            checksum_sha256=result.source_artifact.checksum_sha256,
+            mime_type="application/octet-stream",
+            redaction_applied=result.redaction_applied,
+        )
+        if uploaded:
+            payload["artifactId"] = uploaded.artifact_id
+            payload["artifactPath"] = None
+            payload["classification"] = uploaded.classification
         return payload
 
     @staticmethod
@@ -260,3 +294,30 @@ class SkuldBotVisualKeywords:
         if not resolved_path.is_file():
             raise VisualActionError(f"File not found: {path}")
         return resolved_path
+
+    def _upload_artifact(
+        self,
+        *,
+        action: VisualActionKind,
+        artifact_path: Path,
+        checksum_sha256: str,
+        mime_type: str,
+        redaction_applied: bool | None = None,
+    ) -> Any | None:
+        if not artifact_upload_required():
+            return None
+
+        if self._lease_context is None:
+            raise VisualActionError("Display lease is required for evidence upload.")
+
+        try:
+            return OrchestratorArtifactUploader().upload(
+                run_id=self._lease_context.run_id,
+                action=action.value,
+                artifact_path=artifact_path,
+                checksum_sha256=checksum_sha256,
+                mime_type=mime_type,
+                redaction_applied=redaction_applied,
+            )
+        except ArtifactUploadError as exc:
+            raise VisualActionError(str(exc)) from exc

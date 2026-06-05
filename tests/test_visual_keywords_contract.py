@@ -17,6 +17,7 @@ from skuldbot_runner.models import (
 )
 from skuldbot_runner.visual_adapter import VisualArtifact
 from skuldbot_runner.visual_keywords import (
+    SkuldBotVisualKeywords,
     VisualActionError,
     VisualActionResult,
     require_visual_action,
@@ -118,9 +119,13 @@ def test_visual_action_result_uses_orchestrator_field_names():
     assert result.to_robot_dict() == {
         "action": "screenshot",
         "success": True,
+        "artifactId": None,
         "artifactPath": "/tmp/run/screen.png",
         "checksumSha256": "abc123",
         "sizeBytes": 42,
+        "mimeType": None,
+        "classification": None,
+        "redactionApplied": None,
         "message": "captured",
     }
 
@@ -136,3 +141,22 @@ def test_visual_artifact_computes_checksum_and_size(tmp_path):
     assert artifact.checksum_sha256 == (
         "f3d1d3cb4773b0ead078710ee812a1033dc750f9265b190dc77c0bd25a6bbfce"
     )
+
+
+def test_visual_artifact_upload_fails_closed_without_orchestrator(monkeypatch, tmp_path):
+    monkeypatch.setenv("SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED", "true")
+    monkeypatch.delenv("SKULDBOT_ORCHESTRATOR_URL", raising=False)
+    monkeypatch.delenv("SKULDBOT_API_KEY", raising=False)
+
+    artifact_path = tmp_path / "frame.bin"
+    artifact_path.write_bytes(b"skuldbot-frame")
+    keywords = SkuldBotVisualKeywords()
+    keywords._lease_context = _active_lease(VisualActionKind.SCREENSHOT)
+
+    with pytest.raises(VisualActionError, match="ORCHESTRATOR_URL"):
+        keywords._upload_artifact(
+            action=VisualActionKind.SCREENSHOT,
+            artifact_path=artifact_path,
+            checksum_sha256="abc123",
+            mime_type="application/octet-stream",
+        )
