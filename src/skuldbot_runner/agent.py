@@ -34,6 +34,7 @@ from .models import (
 )
 from .runner_capacity import (
     job_requires_linux_virtual_display,
+    job_requires_windows_interactive,
     runner_can_claim_job_locally,
 )
 from .system_info import get_system_info
@@ -217,6 +218,7 @@ class RunnerAgent:
             active_graphical_jobs - active_graphical_sessions,
             0,
         )
+        reserved_windows_interactive_slots = 0
         for job in jobs:
             if remaining_capacity <= 0:
                 break
@@ -230,11 +232,14 @@ class RunnerAgent:
                 max_concurrent_jobs=self.config.max_concurrent_jobs,
                 linux_virtual_display_pool=self._linux_virtual_display_pool,
                 reserved_linux_virtual_display_slots=reserved_linux_virtual_display_slots,
+                windows_interactive_slots_available=0,
+                reserved_windows_interactive_slots=reserved_windows_interactive_slots,
             ):
                 logger.debug(
                     "Skipping job until local runner capacity is available",
                     job_id=job.id,
                     requires_linux_virtual_display=job_requires_linux_virtual_display(job),
+                    requires_windows_interactive=job_requires_windows_interactive(job),
                 )
                 continue
 
@@ -248,6 +253,8 @@ class RunnerAgent:
                 remaining_capacity -= 1
                 if job_requires_linux_virtual_display(claimed_job):
                     reserved_linux_virtual_display_slots += 1
+                if job_requires_windows_interactive(claimed_job):
+                    reserved_windows_interactive_slots += 1
             else:
                 logger.debug(
                     "Failed to claim job",

@@ -8,11 +8,12 @@ from skuldbot_runner.linux_virtual_display import (
 from skuldbot_runner.models import DisplayLease, Job
 from skuldbot_runner.runner_capacity import (
     job_requires_linux_virtual_display,
+    job_requires_windows_interactive,
     runner_can_claim_job_locally,
 )
 
 
-def _display_lease() -> DisplayLease:
+def _display_lease(runtime_plane: str = "linux_virtual_display") -> DisplayLease:
     return DisplayLease.model_validate(
         {
             "leaseId": "lease-capacity-1",
@@ -25,7 +26,7 @@ def _display_lease() -> DisplayLease:
                 "tenantId": "tenant-capacity-1",
                 "runId": "run-capacity-1",
                 "stepId": "step-capacity-1",
-                "runtimePlane": "linux_virtual_display",
+                "runtimePlane": runtime_plane,
                 "mode": "unattended",
                 "requiredCapabilities": ["graphical_display"],
                 "requiredVisualActions": ["screenshot"],
@@ -36,7 +37,7 @@ def _display_lease() -> DisplayLease:
                 "sessionId": "session-capacity-1",
                 "tenantId": "tenant-capacity-1",
                 "runnerId": "runner-capacity-1",
-                "runtimePlane": "linux_virtual_display",
+                "runtimePlane": runtime_plane,
                 "mode": "unattended",
                 "acquiredAt": "2026-06-03T10:00:00Z",
                 "display": {
@@ -135,6 +136,67 @@ def test_runner_claim_capacity_rejects_when_global_job_capacity_is_full():
             active_jobs=2,
             max_concurrent_jobs=2,
             linux_virtual_display_pool=_pool(max_sessions=3),
+        )
+        is False
+    )
+
+
+def test_runner_claim_capacity_rejects_windows_job_without_session_pool_slot():
+    job = Job(
+        id="run-windows",
+        display_lease=_display_lease("windows_interactive"),
+    )
+
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=0,
+            max_concurrent_jobs=2,
+            linux_virtual_display_pool=None,
+            windows_interactive_slots_available=0,
+        )
+        is False
+    )
+    assert job_requires_linux_virtual_display(job) is False
+    assert job_requires_windows_interactive(job) is True
+
+
+def test_runner_claim_capacity_reserves_windows_slots_before_claiming():
+    job = Job(
+        id="run-windows",
+        display_lease=_display_lease("windows_interactive"),
+    )
+
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=0,
+            max_concurrent_jobs=3,
+            linux_virtual_display_pool=None,
+            windows_interactive_slots_available=2,
+            reserved_windows_interactive_slots=0,
+        )
+        is True
+    )
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=1,
+            max_concurrent_jobs=3,
+            linux_virtual_display_pool=None,
+            windows_interactive_slots_available=2,
+            reserved_windows_interactive_slots=1,
+        )
+        is True
+    )
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=2,
+            max_concurrent_jobs=3,
+            linux_virtual_display_pool=None,
+            windows_interactive_slots_available=2,
+            reserved_windows_interactive_slots=2,
         )
         is False
     )

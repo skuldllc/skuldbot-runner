@@ -35,6 +35,7 @@ _WINDOWS_SESSION_POOL_ENV_KEYS = (
     "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON",
     "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL",
 )
+_WINDOWS_SESSION_BROKER_ENABLED = "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED"
 _WINDOWS_DEDICATED_SESSION_ISOLATION = "dedicated_user_session"
 _PLAINTEXT_SECRET_KEYS = {
     "password",
@@ -67,6 +68,7 @@ class GraphicalProbeInput:
     dpi_scale: float | None = None
     max_graphical_sessions: int | None = None
     current_graphical_sessions: int | None = None
+    windows_session_pool_capacity: int | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,8 @@ def build_graphical_capabilities(
         state = GraphicalDisplayState.AVAILABLE
         connected = True
 
-    supported_modes = _supported_modes_for(plane, env)
+    windows_pool_capacity = probe.windows_session_pool_capacity or 0
+    supported_modes = _supported_modes_for(plane, env, windows_pool_capacity)
     if not supported_modes:
         return None
 
@@ -196,7 +199,12 @@ def build_graphical_capabilities(
             VisualActionKind.TYPE_TEXT,
             VisualActionKind.HOTKEY,
         ],
-        max_graphical_sessions=_max_sessions_for(plane, env, probe.max_graphical_sessions),
+        max_graphical_sessions=_max_sessions_for(
+            plane,
+            env,
+            probe.max_graphical_sessions,
+            windows_pool_capacity,
+        ),
         current_graphical_sessions=probe.current_graphical_sessions or 0,
         installed_systems=_installed_systems(env),
     )
@@ -269,9 +277,10 @@ def _has_windows_interactive_session(env: Mapping[str, str]) -> bool:
 def _supported_modes_for(
     plane: GraphicalRuntimePlane,
     env: Mapping[str, str],
+    windows_pool_capacity: int = 0,
 ) -> list[GraphicalSessionMode]:
     if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
-        if _windows_session_pool_capacity(env) > 0:
+        if windows_pool_capacity > 0:
             return [GraphicalSessionMode.UNATTENDED]
         return [GraphicalSessionMode.ATTENDED]
 
@@ -293,6 +302,7 @@ def _max_sessions_for(
     plane: GraphicalRuntimePlane,
     env: Mapping[str, str],
     requested_max: int | None,
+    windows_pool_capacity: int = 0,
 ) -> int:
     requested = requested_max or _read_int(env.get("SKULDBOT_MAX_GRAPHICAL_SESSIONS")) or 1
     if requested < 1:
@@ -308,9 +318,8 @@ def _max_sessions_for(
         return 1
 
     if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
-        pool_capacity = _windows_session_pool_capacity(env)
-        if pool_capacity > 0:
-            return min(requested, pool_capacity)
+        if windows_pool_capacity > 0:
+            return min(requested, windows_pool_capacity)
         return 1
 
     if plane in {
@@ -330,7 +339,12 @@ def _installed_systems(env: Mapping[str, str]) -> list[str]:
     return sorted(set(systems))
 
 
-def _windows_session_pool_capacity(env: Mapping[str, str]) -> int:
+def windows_session_pool_capacity_from_environment(env: Mapping[str, str]) -> int:
+    """Return validated Windows pool slot count from explicit runner configuration."""
+
+    if not _read_bool(env.get(_WINDOWS_SESSION_BROKER_ENABLED)):
+        return 0
+
     if not _read_bool(env.get("SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED")):
         return 0
 

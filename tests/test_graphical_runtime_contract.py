@@ -8,6 +8,7 @@ from skuldbot_runner.graphical_runtime import (
     build_display_lease_environment,
     build_graphical_capabilities,
     read_display_lease_context,
+    windows_session_pool_capacity_from_environment,
 )
 from skuldbot_runner.models import (
     DisplayLease,
@@ -211,17 +212,22 @@ def test_windows_interactive_does_not_declare_multi_session_without_session_pool
 
 
 def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": (
+            _windows_session_pool("session-1", "session-2")
+        ),
+    }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
             platform_system="Windows",
-            environment={
-                "SESSIONNAME": "console",
-                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": (
-                    _windows_session_pool("session-1", "session-2")
-                ),
-            },
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
         )
     )
 
@@ -234,15 +240,45 @@ def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
     assert VisualActionKind.IMAGE_CLICK in capability.supported_visual_actions
 
 
-def test_windows_session_pool_flag_without_slots_does_not_declare_multi_session():
+def test_windows_session_pool_without_broker_does_not_declare_multi_session():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": (
+            _windows_session_pool("session-1", "session-2")
+        ),
+    }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
             platform_system="Windows",
-            environment={
-                "SESSIONNAME": "console",
-                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
-            },
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
+        )
+    )
+
+    assert windows_session_pool_capacity_from_environment(environment) == 0
+    assert capability is not None
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_session_pool_flag_without_slots_does_not_declare_multi_session():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+    }
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
         )
     )
 
@@ -252,91 +288,109 @@ def test_windows_session_pool_flag_without_slots_does_not_declare_multi_session(
 
 
 def test_windows_session_pool_rejects_malformed_pool_config():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": "not-json",
+    }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
             platform_system="Windows",
-            environment={
-                "SESSIONNAME": "console",
-                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": "not-json",
-            },
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
         )
     )
 
+    assert windows_session_pool_capacity_from_environment(environment) == 0
     assert capability is not None
     assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
     assert capability.max_graphical_sessions == 1
 
 
 def test_windows_session_pool_rejects_plaintext_credentials():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
+            [
+                {
+                    "sessionId": "session-1",
+                    "robotUserRef": "robot-user-ref-session-1",
+                    "credentialRefKey": "vault-key-session-1",
+                    "password": "not-allowed",
+                    "isolation": {
+                        "kind": "dedicated_user_session",
+                        "inputIsolated": True,
+                        "clipboardIsolated": True,
+                    },
+                }
+            ]
+        ),
+    }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
             platform_system="Windows",
-            environment={
-                "SESSIONNAME": "console",
-                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
-                    [
-                        {
-                            "sessionId": "session-1",
-                            "robotUserRef": "robot-user-ref-session-1",
-                            "credentialRefKey": "vault-key-session-1",
-                            "password": "not-allowed",
-                            "isolation": {
-                                "kind": "dedicated_user_session",
-                                "inputIsolated": True,
-                                "clipboardIsolated": True,
-                            },
-                        }
-                    ]
-                ),
-            },
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
         )
     )
 
+    assert windows_session_pool_capacity_from_environment(environment) == 0
     assert capability is not None
     assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
     assert capability.max_graphical_sessions == 1
 
 
 def test_windows_session_pool_requires_dedicated_input_and_clipboard_isolation():
+    environment = {
+        "SESSIONNAME": "console",
+        "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
+            [
+                {
+                    "sessionId": "session-1",
+                    "robotUserRef": "robot-user-ref-session-1",
+                    "credentialRefKey": "vault-key-session-1",
+                    "isolation": {
+                        "kind": "shared_desktop",
+                        "inputIsolated": True,
+                        "clipboardIsolated": True,
+                    },
+                },
+                {
+                    "sessionId": "session-2",
+                    "robotUserRef": "robot-user-ref-session-2",
+                    "credentialRefKey": "vault-key-session-2",
+                    "isolation": {
+                        "kind": "dedicated_user_session",
+                        "inputIsolated": True,
+                        "clipboardIsolated": False,
+                    },
+                },
+            ]
+        ),
+    }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
             platform_system="Windows",
-            environment={
-                "SESSIONNAME": "console",
-                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
-                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
-                    [
-                        {
-                            "sessionId": "session-1",
-                            "robotUserRef": "robot-user-ref-session-1",
-                            "credentialRefKey": "vault-key-session-1",
-                            "isolation": {
-                                "kind": "shared_desktop",
-                                "inputIsolated": True,
-                                "clipboardIsolated": True,
-                            },
-                        },
-                        {
-                            "sessionId": "session-2",
-                            "robotUserRef": "robot-user-ref-session-2",
-                            "credentialRefKey": "vault-key-session-2",
-                            "isolation": {
-                                "kind": "dedicated_user_session",
-                                "inputIsolated": True,
-                                "clipboardIsolated": False,
-                            },
-                        },
-                    ]
-                ),
-            },
+            environment=environment,
+            windows_session_pool_capacity=(
+                windows_session_pool_capacity_from_environment(environment)
+            ),
         )
     )
 
+    assert windows_session_pool_capacity_from_environment(environment) == 0
     assert capability is not None
     assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
     assert capability.max_graphical_sessions == 1
