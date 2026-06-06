@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from .models import (
     DisplayLease,
@@ -29,6 +31,21 @@ DEFAULT_STALE_AFTER_SECONDS = 30
 
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _WINDOWS_INTERACTIVE_SESSIONS = ("console", "rdp-tcp")
+_WINDOWS_SESSION_POOL_ENV_KEYS = (
+    "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON",
+    "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL",
+)
+_WINDOWS_DEDICATED_SESSION_ISOLATION = "dedicated_user_session"
+_PLAINTEXT_SECRET_KEYS = {
+    "password",
+    "passwordvalue",
+    "secret",
+    "secretvalue",
+    "token",
+    "tokenvalue",
+    "credential",
+    "credentialvalue",
+}
 ACTIVE_DISPLAY_LEASE_STATES = {DisplayLeaseState.GRANTED, DisplayLeaseState.ACTIVE}
 
 LEASE_ENV_LEASE_ID = "SKULDBOT_DISPLAY_LEASE_ID"
@@ -254,6 +271,8 @@ def _supported_modes_for(
     env: Mapping[str, str],
 ) -> list[GraphicalSessionMode]:
     if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
+        if _windows_session_pool_capacity(env) > 0:
+            return [GraphicalSessionMode.UNATTENDED]
         return [GraphicalSessionMode.ATTENDED]
 
     if plane == GraphicalRuntimePlane.REMOTE_DESKTOP:
@@ -289,8 +308,9 @@ def _max_sessions_for(
         return 1
 
     if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
-        if _read_bool(env.get("SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED")):
-            return requested
+        pool_capacity = _windows_session_pool_capacity(env)
+        if pool_capacity > 0:
+            return min(requested, pool_capacity)
         return 1
 
     if plane in {
@@ -308,6 +328,79 @@ def _installed_systems(env: Mapping[str, str]) -> list[str]:
     raw = env.get("SKULDBOT_INSTALLED_SYSTEMS", "")
     systems = [item.strip() for item in raw.split(",") if item.strip()]
     return sorted(set(systems))
+
+
+def _windows_session_pool_capacity(env: Mapping[str, str]) -> int:
+    if not _read_bool(env.get("SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED")):
+        return 0
+
+    raw_pool = next(
+        (
+            env[key].strip()
+            for key in _WINDOWS_SESSION_POOL_ENV_KEYS
+            if env.get(key, "").strip()
+        ),
+        "",
+    )
+    if not raw_pool:
+        return 0
+
+    try:
+        parsed = json.loads(raw_pool)
+    except json.JSONDecodeError:
+        return 0
+
+    if not isinstance(parsed, list):
+        return 0
+
+    valid_session_ids = {
+        slot["sessionId"].strip()
+        for slot in parsed
+        if _windows_session_pool_slot_is_valid(slot)
+    }
+    return len(valid_session_ids)
+
+
+def _windows_session_pool_slot_is_valid(slot: Any) -> bool:
+    if not isinstance(slot, dict):
+        return False
+
+    if _contains_plaintext_secret(slot):
+        return False
+
+    if not _nonempty_string(slot.get("sessionId")):
+        return False
+    if not _nonempty_string(slot.get("robotUserRef")):
+        return False
+    if not _nonempty_string(slot.get("credentialRefKey")):
+        return False
+
+    isolation = slot.get("isolation")
+    if not isinstance(isolation, dict):
+        return False
+
+    if str(isolation.get("kind", "")).strip().lower() != (
+        _WINDOWS_DEDICATED_SESSION_ISOLATION
+    ):
+        return False
+
+    return bool(isolation.get("inputIsolated")) and bool(
+        isolation.get("clipboardIsolated")
+    )
+
+
+def _contains_plaintext_secret(slot: Mapping[str, Any]) -> bool:
+    for key in slot:
+        normalized = "".join(ch for ch in key.lower() if ch.isalnum())
+        if normalized == "credentialrefkey":
+            continue
+        if normalized in _PLAINTEXT_SECRET_KEYS:
+            return True
+    return False
+
+
+def _nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _read_runtime_plane(value: str | None) -> GraphicalRuntimePlane | None:

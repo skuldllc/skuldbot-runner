@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Skuld, LLC. All rights reserved.
 # Proprietary and confidential. Reverse engineering prohibited.
 
+import json
+
 from skuldbot_runner.graphical_runtime import (
     GraphicalProbeInput,
     build_display_lease_environment,
@@ -19,6 +21,24 @@ from skuldbot_runner.models import (
     VisualActionKind,
 )
 from skuldbot_runner.payloads import build_heartbeat_payload
+
+
+def _windows_session_pool(*session_ids: str) -> str:
+    return json.dumps(
+        [
+            {
+                "sessionId": session_id,
+                "robotUserRef": f"robot-user-ref-{session_id}",
+                "credentialRefKey": f"vault-key-{session_id}",
+                "isolation": {
+                    "kind": "dedicated_user_session",
+                    "inputIsolated": True,
+                    "clipboardIsolated": True,
+                },
+            }
+            for session_id in session_ids
+        ]
+    )
 
 
 def _system_info() -> SystemInfo:
@@ -198,6 +218,9 @@ def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
                 "SESSIONNAME": "console",
                 "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
                 "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": (
+                    _windows_session_pool("session-1", "session-2")
+                ),
             },
         )
     )
@@ -206,8 +229,117 @@ def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
     assert capability.supported_runtime_planes == [
         GraphicalRuntimePlane.WINDOWS_INTERACTIVE
     ]
-    assert capability.max_graphical_sessions == 3
+    assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
+    assert capability.max_graphical_sessions == 2
     assert VisualActionKind.IMAGE_CLICK in capability.supported_visual_actions
+
+
+def test_windows_session_pool_flag_without_slots_does_not_declare_multi_session():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_session_pool_rejects_malformed_pool_config():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": "not-json",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_session_pool_rejects_plaintext_credentials():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
+                    [
+                        {
+                            "sessionId": "session-1",
+                            "robotUserRef": "robot-user-ref-session-1",
+                            "credentialRefKey": "vault-key-session-1",
+                            "password": "not-allowed",
+                            "isolation": {
+                                "kind": "dedicated_user_session",
+                                "inputIsolated": True,
+                                "clipboardIsolated": True,
+                            },
+                        }
+                    ]
+                ),
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
+    assert capability.max_graphical_sessions == 1
+
+
+def test_windows_session_pool_requires_dedicated_input_and_clipboard_isolation():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SESSIONNAME": "console",
+                "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
+                "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
+                    [
+                        {
+                            "sessionId": "session-1",
+                            "robotUserRef": "robot-user-ref-session-1",
+                            "credentialRefKey": "vault-key-session-1",
+                            "isolation": {
+                                "kind": "shared_desktop",
+                                "inputIsolated": True,
+                                "clipboardIsolated": True,
+                            },
+                        },
+                        {
+                            "sessionId": "session-2",
+                            "robotUserRef": "robot-user-ref-session-2",
+                            "credentialRefKey": "vault-key-session-2",
+                            "isolation": {
+                                "kind": "dedicated_user_session",
+                                "inputIsolated": True,
+                                "clipboardIsolated": False,
+                            },
+                        },
+                    ]
+                ),
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
+    assert capability.max_graphical_sessions == 1
 
 
 def test_windows_services_session_declares_no_graphical_capability():
