@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from typing import Any
 _DEFAULT_PIPE_NAME = r"\\.\pipe\skuldbot-windows-session-launcher"
 _PIPE_ENV_KEY = "SKULDBOT_WINDOWS_NATIVE_LAUNCHER_PIPE"
 _PROTOCOL_VERSION = 1
+_PIPE_CONNECT_TIMEOUT_SECONDS = 10.0
+_PIPE_CONNECT_RETRY_SECONDS = 0.1
 _WORKER_ENV_ALLOWLIST = {
     "SKULDBOT_DISPLAY_LEASE_ID",
     "SKULDBOT_DISPLAY_LEASE_RUN_ID",
@@ -147,14 +150,22 @@ class WindowsNativeLauncher:
     @staticmethod
     def _named_pipe_transport(pipe_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         request_line = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
-        try:
-            with open(pipe_name, "r+b", buffering=0) as pipe:
-                pipe.write(request_line.encode("utf-8"))
-                response_line = pipe.readline().decode("utf-8", errors="replace")
-        except OSError as exc:
+        deadline = time.monotonic() + _PIPE_CONNECT_TIMEOUT_SECONDS
+        last_error: OSError | None = None
+        response_line = ""
+        while time.monotonic() <= deadline:
+            try:
+                with open(pipe_name, "r+b", buffering=0) as pipe:
+                    pipe.write(request_line.encode("utf-8"))
+                    response_line = pipe.readline().decode("utf-8", errors="replace")
+                break
+            except OSError as exc:
+                last_error = exc
+                time.sleep(_PIPE_CONNECT_RETRY_SECONDS)
+        else:
             raise WindowsNativeLauncherError(
                 "Windows native launcher service is not reachable."
-            ) from exc
+            ) from last_error
 
         try:
             response = json.loads(response_line)

@@ -18,6 +18,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -315,6 +316,7 @@ class PyWin32NamedPipeHost:
                 "pywin32 is required for the Windows named-pipe host."
             ) from exc
 
+        workers: list[threading.Thread] = []
         while not (stop_requested and stop_requested()):
             pipe = win32pipe.CreateNamedPipe(
                 self.pipe_name,
@@ -322,7 +324,7 @@ class PyWin32NamedPipeHost:
                 win32pipe.PIPE_TYPE_MESSAGE
                 | win32pipe.PIPE_READMODE_MESSAGE
                 | win32pipe.PIPE_WAIT,
-                1,
+                win32pipe.PIPE_UNLIMITED_INSTANCES,
                 65536,
                 65536,
                 0,
@@ -331,14 +333,36 @@ class PyWin32NamedPipeHost:
             try:
                 win32pipe.ConnectNamedPipe(pipe, None)
                 if stop_requested and stop_requested():
+                    win32pipe.DisconnectNamedPipe(pipe)
+                    win32file.CloseHandle(pipe)
                     continue
-                _, data = win32file.ReadFile(pipe, 65536)
-                response = response_from_request_bytes(service, data)
-                response_line = json.dumps(response, separators=(",", ":")) + "\n"
-                win32file.WriteFile(pipe, response_line.encode("utf-8"))
-            finally:
-                win32pipe.DisconnectNamedPipe(pipe)
+                worker = threading.Thread(
+                    target=self._handle_connected_pipe,
+                    args=(pipe, service, win32file, win32pipe),
+                    daemon=True,
+                )
+                worker.start()
+                workers.append(worker)
+                workers = [item for item in workers if item.is_alive()]
+            except Exception:
                 win32file.CloseHandle(pipe)
+                raise
+
+    @staticmethod
+    def _handle_connected_pipe(
+        pipe: Any,
+        service: WindowsHostService,
+        win32file: Any,
+        win32pipe: Any,
+    ) -> None:
+        try:
+            _, data = win32file.ReadFile(pipe, 65536)
+            response = response_from_request_bytes(service, data)
+            response_line = json.dumps(response, separators=(",", ":")) + "\n"
+            win32file.WriteFile(pipe, response_line.encode("utf-8"))
+        finally:
+            win32pipe.DisconnectNamedPipe(pipe)
+            win32file.CloseHandle(pipe)
 
     def request_stop(self) -> None:
         """Best-effort wake-up for a service stop request."""
