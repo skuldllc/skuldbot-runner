@@ -258,10 +258,9 @@ class PyWin32SessionProcessAdapter:
 
         return win32security.DuplicateTokenEx(
             token,
-            win32con.MAXIMUM_ALLOWED,
-            None,
             win32security.SecurityImpersonation,
             win32security.TokenPrimary,
+            win32con.MAXIMUM_ALLOWED,
         )
 
     @staticmethod
