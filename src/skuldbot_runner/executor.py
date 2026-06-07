@@ -28,6 +28,9 @@ WINDOWS_SESSION_ID_ENV = "SKULDBOT_WINDOWS_SESSION_ID"
 WINDOWS_BROKER_COMMAND_ENV = "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"
 WINDOWS_ROBOT_USER_REF_ENV = "SKULDBOT_WINDOWS_ROBOT_USER_REF"
 WINDOWS_CREDENTIAL_REF_KEY_ENV = "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY"
+WINDOWS_PROFILE_REF_ENV = "SKULDBOT_WINDOWS_SESSION_PROFILE_REF"
+WINDOWS_TEMP_ROOT_REF_ENV = "SKULDBOT_WINDOWS_SESSION_TEMP_ROOT_REF"
+WINDOWS_DOWNLOADS_ROOT_REF_ENV = "SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF"
 
 
 class BotExecutor:
@@ -473,7 +476,7 @@ class BotExecutor:
                 "Windows interactive session execution requires user and credential refs."
             )
 
-        return [
+        broker_args = [
             broker_command,
             "--session-id",
             session_id,
@@ -481,9 +484,24 @@ class BotExecutor:
             robot_user_ref,
             "--credential-ref-key",
             credential_ref_key,
-            "--",
-            *command,
         ]
+        broker_args.extend(
+            self._optional_windows_ref_arg("--profile-ref", env.get(WINDOWS_PROFILE_REF_ENV))
+        )
+        broker_args.extend(
+            self._optional_windows_ref_arg("--temp-root-ref", env.get(WINDOWS_TEMP_ROOT_REF_ENV))
+        )
+        broker_args.extend(
+            self._optional_windows_ref_arg(
+                "--downloads-root-ref", env.get(WINDOWS_DOWNLOADS_ROOT_REF_ENV)
+            )
+        )
+        return [*broker_args, "--", *command]
+
+    @staticmethod
+    def _optional_windows_ref_arg(name: str, value: str | None) -> list[str]:
+        cleaned = value.strip() if isinstance(value, str) else ""
+        return [name, cleaned] if cleaned else []
 
     def _build_runtime_worker_environment(
         self,

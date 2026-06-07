@@ -106,6 +106,9 @@ def test_windows_session_runtime_command_wraps_worker_without_plaintext_secret()
             "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
             "SKULDBOT_WINDOWS_ROBOT_USER_REF": "robot-user-ref-1",
             "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY": "vault-key-1",
+            "SKULDBOT_WINDOWS_SESSION_PROFILE_REF": "profile-ref-1",
+            "SKULDBOT_WINDOWS_SESSION_TEMP_ROOT_REF": "temp-ref-1",
+            "SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF": "downloads-ref-1",
         },
     )
 
@@ -117,6 +120,12 @@ def test_windows_session_runtime_command_wraps_worker_without_plaintext_secret()
         "robot-user-ref-1",
         "--credential-ref-key",
         "vault-key-1",
+        "--profile-ref",
+        "profile-ref-1",
+        "--temp-root-ref",
+        "temp-ref-1",
+        "--downloads-root-ref",
+        "downloads-ref-1",
         "--",
         "python",
         "-m",
