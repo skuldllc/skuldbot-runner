@@ -23,6 +23,29 @@ from typing import Any
 _DEFAULT_PIPE_NAME = r"\\.\pipe\skuldbot-windows-session-launcher"
 _PIPE_ENV_KEY = "SKULDBOT_WINDOWS_NATIVE_LAUNCHER_PIPE"
 _PROTOCOL_VERSION = 1
+_WORKER_ENV_ALLOWLIST = {
+    "SKULDBOT_DISPLAY_LEASE_ID",
+    "SKULDBOT_DISPLAY_LEASE_RUN_ID",
+    "SKULDBOT_DISPLAY_LEASE_STATE",
+    "SKULDBOT_DISPLAY_LEASE_RUNTIME_PLANE",
+    "SKULDBOT_DISPLAY_LEASE_SESSION_MODE",
+    "SKULDBOT_DISPLAY_LEASE_ACTIONS",
+    "SKULDBOT_GRAPHICAL_RUNTIME_PLANE",
+    "SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED",
+    "SKULDBOT_WINDOWS_SESSION_ID",
+    "SKULDBOT_WINDOWS_ROBOT_USER_REF",
+    "SKULDBOT_WINDOWS_SESSION_PROFILE_REF",
+    "SKULDBOT_WINDOWS_SESSION_TEMP_ROOT_REF",
+    "SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF",
+}
+_FORBIDDEN_ENV_KEY_FRAGMENTS = {
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "APIKEY",
+    "API_KEY",
+    "CREDENTIAL",
+}
 
 
 class WindowsNativeLauncherError(RuntimeError):
@@ -40,6 +63,7 @@ class WindowsNativeLaunchRequest:
     profile_ref: str | None = None
     temp_root_ref: str | None = None
     downloads_root_ref: str | None = None
+    worker_environment: dict[str, str] | None = None
 
 
 Transport = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -73,6 +97,9 @@ class WindowsNativeLauncher:
             "tempRootRef": request.temp_root_ref or None,
             "downloadsRootRef": request.downloads_root_ref or None,
             "command": list(request.command),
+            "workerEnvironment": sanitize_worker_environment(
+                request.worker_environment or self.environment
+            ),
         }
 
     def run(self, request: WindowsNativeLaunchRequest) -> int:
@@ -115,6 +142,7 @@ class WindowsNativeLauncher:
             raise WindowsNativeLauncherError(
                 "Windows native launcher worker command must contain nonempty strings."
             )
+        sanitize_worker_environment(request.worker_environment or {})
 
     @staticmethod
     def _named_pipe_transport(pipe_name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +184,7 @@ def request_from_args(args: argparse.Namespace) -> WindowsNativeLaunchRequest:
         temp_root_ref=args.temp_root_ref,
         downloads_root_ref=args.downloads_root_ref,
         command=command,
+        worker_environment=dict(os.environ),
     )
 
 
@@ -192,6 +221,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _read_string(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def sanitize_worker_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Return the explicit, non-secret environment forwarded to a Windows worker."""
+
+    cleaned: dict[str, str] = {}
+    for key, value in environment.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise WindowsNativeLauncherError("Worker environment keys and values must be strings.")
+        normalized = key.upper()
+        if normalized in _WORKER_ENV_ALLOWLIST:
+            if any(fragment in normalized for fragment in _FORBIDDEN_ENV_KEY_FRAGMENTS):
+                raise WindowsNativeLauncherError("Worker environment must not contain secrets.")
+            cleaned[key] = value
+    return cleaned
 
 
 if __name__ == "__main__":

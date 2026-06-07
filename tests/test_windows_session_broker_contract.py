@@ -161,6 +161,9 @@ def test_windows_session_broker_launcher_environment_is_explicit_allowlist():
         "AWS_ACCESS_KEY_ID": "AKID-LEAK",
         "DATABASE_URL": "postgres://u:SUPERSECRETPW@h/db",
         "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY": "vault-key-1",
+        "SKULDBOT_DISPLAY_LEASE_ID": "lease-1",
+        "SKULDBOT_DISPLAY_LEASE_ACTIONS": "screenshot,type_text",
+        "SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED": "false",
         "PATH": "/usr/bin",
         "SystemRoot": "C:\\Windows",
     }
@@ -180,6 +183,9 @@ def test_windows_session_broker_launcher_environment_is_explicit_allowlist():
     assert "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY" not in launcher_env
     assert launcher_env["PATH"] == "/usr/bin"
     assert launcher_env["SystemRoot"] == "C:\\Windows"
+    assert launcher_env["SKULDBOT_DISPLAY_LEASE_ID"] == "lease-1"
+    assert launcher_env["SKULDBOT_DISPLAY_LEASE_ACTIONS"] == "screenshot,type_text"
+    assert launcher_env["SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED"] == "false"
 
 
 def test_windows_session_broker_cli_request_keeps_separator_out_of_worker_command():

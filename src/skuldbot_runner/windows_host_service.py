@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import ctypes
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -22,10 +23,27 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .windows_native_launcher import _DEFAULT_PIPE_NAME
+from .windows_native_launcher import _DEFAULT_PIPE_NAME, _WORKER_ENV_ALLOWLIST
 
 _PROTOCOL_VERSION = 1
 _WINDOWS_INTERACTIVE = "windows_interactive"
+_CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
+_WORKER_SYSTEM_ENV_ALLOWLIST = {
+    "ALLUSERSPROFILE",
+    "COMSPEC",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR",
+}
 
 
 class WindowsHostServiceError(RuntimeError):
@@ -84,6 +102,7 @@ class WindowsHostLaunchRequest:
     profile_ref: str | None = None
     temp_root_ref: str | None = None
     downloads_root_ref: str | None = None
+    worker_environment: dict[str, str] | None = None
 
 
 class WindowsProcessAdapter(Protocol):
@@ -171,7 +190,7 @@ class PyWin32SessionProcessAdapter:
             process_handle = self._create_process_with_token(
                 int(token),
                 command_line,
-                win32event,
+                request.worker_environment or {},
             )
             wait_result = win32event.WaitForSingleObject(
                 process_handle,
@@ -232,7 +251,7 @@ class PyWin32SessionProcessAdapter:
     def _create_process_with_token(
         token_handle: int,
         command_line: str,
-        win32event: Any,
+        worker_environment: Mapping[str, str],
     ) -> int:
         """Launch one command in the assigned session using advapi32.
 
@@ -247,13 +266,14 @@ class PyWin32SessionProcessAdapter:
         startup_info.lpDesktop = r"winsta0\default"
         process_info = _CtypesProcessInformation()
         mutable_command = ctypes.create_unicode_buffer(command_line)
+        environment = _build_worker_environment_block(worker_environment)
         created = advapi32.CreateProcessWithTokenW(
             token_handle,
             0,
             None,
             mutable_command,
-            0,
-            None,
+            _CREATE_UNICODE_ENVIRONMENT,
+            environment,
             None,
             ctypes.byref(startup_info),
             ctypes.byref(process_info),
@@ -367,6 +387,38 @@ def _load_windows_process_libraries() -> tuple[Any, Any]:
     return advapi32, kernel32
 
 
+def _read_worker_environment(value: Any) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise WindowsHostServiceError("Windows worker environment must be an object.")
+
+    cleaned: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise WindowsHostServiceError(
+                "Windows worker environment keys and values must be strings."
+            )
+        if key.upper() not in _WORKER_ENV_ALLOWLIST:
+            raise WindowsHostServiceError("Windows worker environment contains an unsupported key.")
+        cleaned[key] = item
+    return cleaned
+
+
+def _build_worker_environment_block(worker_environment: Mapping[str, str]) -> Any:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _WORKER_SYSTEM_ENV_ALLOWLIST
+    }
+    environment.update(worker_environment)
+    environment[_ATTACHED_SESSION_ENV] = "1"
+    environment_block = "".join(
+        f"{key}={value}\0" for key, value in sorted(environment.items())
+    )
+    return ctypes.create_unicode_buffer(environment_block + "\0")
+
+
 def parse_launch_payload(payload: Mapping[str, Any]) -> WindowsHostLaunchRequest:
     """Validate one launcher payload."""
 
@@ -392,6 +444,7 @@ def parse_launch_payload(payload: Mapping[str, Any]) -> WindowsHostLaunchRequest
         raise WindowsHostServiceError(
             "Windows host service worker command must contain nonempty strings."
         )
+    worker_environment = _read_worker_environment(payload.get("workerEnvironment"))
 
     return WindowsHostLaunchRequest(
         session_id=session_id,
@@ -404,6 +457,7 @@ def parse_launch_payload(payload: Mapping[str, Any]) -> WindowsHostLaunchRequest
             "downloadsRootRef",
         ),
         command=list(command),
+        worker_environment=worker_environment,
     )
 
 

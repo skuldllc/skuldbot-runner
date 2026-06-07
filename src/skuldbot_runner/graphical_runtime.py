@@ -265,6 +265,9 @@ def _has_any_display(env: Mapping[str, str]) -> bool:
 
 
 def _has_windows_interactive_session(env: Mapping[str, str]) -> bool:
+    if _read_bool(env.get("SKULDBOT_WINDOWS_SESSION_ATTACHED")):
+        return True
+
     session = env.get("SESSIONNAME", "").strip().lower()
     if not session:
         return False

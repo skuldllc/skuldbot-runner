@@ -25,6 +25,11 @@ def _request(**overrides) -> WindowsNativeLaunchRequest:
         "temp_root_ref": "temp-ref-1",
         "downloads_root_ref": "downloads-ref-1",
         "command": ["python", "-m", "skuldbot_runner.runtime_worker"],
+        "worker_environment": {
+            "SKULDBOT_DISPLAY_LEASE_ID": "lease-1",
+            "SKULDBOT_DISPLAY_LEASE_ACTIONS": "screenshot,type_text",
+            "SKULDBOT_API_KEY": "must-not-pass",
+        },
     }
     values.update(overrides)
     return WindowsNativeLaunchRequest(**values)
@@ -48,6 +53,10 @@ def test_windows_native_launcher_payload_is_refs_only():
         "tempRootRef": "temp-ref-1",
         "downloadsRootRef": "downloads-ref-1",
         "command": ["python", "-m", "skuldbot_runner.runtime_worker"],
+        "workerEnvironment": {
+            "SKULDBOT_DISPLAY_LEASE_ID": "lease-1",
+            "SKULDBOT_DISPLAY_LEASE_ACTIONS": "screenshot,type_text",
+        },
     }
     serialized = json.dumps(payload).lower()
     assert "password" not in serialized

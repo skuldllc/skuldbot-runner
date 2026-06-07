@@ -427,6 +427,23 @@ def test_windows_interactive_session_declares_attended_only():
     assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
 
 
+def test_windows_interactive_attached_worker_declares_display():
+    capability = build_graphical_capabilities(
+        GraphicalProbeInput(
+            platform_system="Windows",
+            environment={
+                "SKULDBOT_GRAPHICAL_RUNTIME_PLANE": "windows_interactive",
+                "SKULDBOT_WINDOWS_SESSION_ATTACHED": "1",
+            },
+        )
+    )
+
+    assert capability is not None
+    assert capability.supported_runtime_planes == [
+        GraphicalRuntimePlane.WINDOWS_INTERACTIVE
+    ]
+
+
 def test_locked_display_is_reported_but_not_route_ready():
     capability = build_graphical_capabilities(
         GraphicalProbeInput(

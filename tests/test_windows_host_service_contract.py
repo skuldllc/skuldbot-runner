@@ -55,7 +55,14 @@ class _CapturingAdapter:
 
 
 def test_windows_host_service_parses_refs_only_payload():
-    request = parse_launch_payload(_payload())
+    request = parse_launch_payload(
+        _payload(
+            workerEnvironment={
+                "SKULDBOT_DISPLAY_LEASE_ID": "lease-1",
+                "SKULDBOT_DISPLAY_LEASE_ACTIONS": "screenshot",
+            }
+        )
+    )
 
     assert request.session_id == "42"
     assert request.robot_user_ref == "robot-user-ref-1"
@@ -64,6 +71,25 @@ def test_windows_host_service_parses_refs_only_payload():
     assert request.temp_root_ref == "temp-ref-1"
     assert request.downloads_root_ref == "downloads-ref-1"
     assert request.command == ["python", "-m", "skuldbot_runner.runtime_worker"]
+    assert request.worker_environment == {
+        "SKULDBOT_DISPLAY_LEASE_ID": "lease-1",
+        "SKULDBOT_DISPLAY_LEASE_ACTIONS": "screenshot",
+    }
+
+
+def test_windows_host_service_rejects_unsupported_worker_environment():
+    for worker_environment in (
+        {"SKULDBOT_API_KEY": "secret"},
+        {"PASSWORD": "secret"},
+        {"UNRELATED": "value"},
+        {"SKULDBOT_DISPLAY_LEASE_ID": 123},
+        "not-an-object",
+    ):
+        try:
+            parse_launch_payload(_payload(workerEnvironment=worker_environment))
+            raise AssertionError("host service should reject unsafe worker environment")
+        except WindowsHostServiceError as exc:
+            assert "environment" in str(exc)
 
 
 def test_windows_host_service_rejects_wrong_protocol_and_plane():

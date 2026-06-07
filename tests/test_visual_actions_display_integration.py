@@ -18,9 +18,16 @@ from skuldbot_runner.linux_virtual_display import (
 )
 from skuldbot_runner.models import DisplayLease, Job
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
+from skuldbot_runner.windows_session_pool import (
+    WindowsInteractiveSessionPool,
+    slots_from_environment,
+)
 
 RUN_DISPLAY_TESTS = os.environ.get("SKULDBOT_VISUAL_ACTION_INTEGRATION") == "1"
 RUN_XVFB_TESTS = os.environ.get("SKULDBOT_XVFB_VISUAL_ACTION_INTEGRATION") == "1"
+RUN_WINDOWS_CONCURRENT_TESTS = (
+    os.environ.get("SKULDBOT_WINDOWS_CONCURRENT_VISUAL_INTEGRATION") == "1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +54,12 @@ def display_lease_environment(job: Job):
                 os.environ[key] = previous_value
 
 
-def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> DisplayLease:
+def _display_lease(
+    *actions: str,
+    run_id: str = "run-visual-integration",
+    runtime_plane: str = "linux_virtual_display",
+    mode: str = "unattended",
+) -> DisplayLease:
     return DisplayLease.model_validate(
         {
             "leaseId": f"lease-{run_id}",
@@ -60,8 +72,8 @@ def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> Dis
                 "tenantId": "tenant-visual-integration",
                 "runId": run_id,
                 "stepId": "step-visual-integration",
-                "runtimePlane": "linux_virtual_display",
-                "mode": "unattended",
+                "runtimePlane": runtime_plane,
+                "mode": mode,
                 "requiredCapabilities": ["graphical_display"],
                 "requiredVisualActions": list(actions),
                 "sessionCredentialRefs": [],
@@ -71,8 +83,8 @@ def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> Dis
                 "sessionId": "session-visual-integration",
                 "tenantId": "tenant-visual-integration",
                 "runnerId": "runner-visual-integration",
-                "runtimePlane": "linux_virtual_display",
-                "mode": "unattended",
+                "runtimePlane": runtime_plane,
+                "mode": mode,
                 "acquiredAt": "2026-06-03T10:00:00Z",
                 "display": {
                     "state": "active",
@@ -157,6 +169,7 @@ def test_xvfb_display_executes_visual_keywords_with_lease(tmp_path):
 
 VISUAL_RUNNER_SCRIPT = r"""
 import json
+import os
 import sys
 
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
@@ -176,6 +189,9 @@ print(
             "hotkey": hotkey,
             "waited": waited,
             "clicked": clicked,
+            "sessionId": os.environ.get("SKULDBOT_WINDOWS_SESSION_ID", ""),
+            "robotUserRef": os.environ.get("SKULDBOT_WINDOWS_ROBOT_USER_REF", ""),
+            "attached": os.environ.get("SKULDBOT_WINDOWS_SESSION_ATTACHED", ""),
         }
     )
 )
@@ -234,6 +250,98 @@ def test_xvfb_pool_runs_two_visual_jobs_with_isolated_evidence(tmp_path):
     assert leases[0].display != leases[1].display
     assert artifact_paths[0] != artifact_paths[1]
     for result, artifact_path in zip(results, artifact_paths, strict=True):
+        screenshot = result["screenshot"]
+        assert screenshot["success"] is True
+        assert screenshot["artifactPath"] == str(artifact_path)
+        assert screenshot["sizeBytes"] > 0
+        assert len(screenshot["checksumSha256"]) == 64
+        assert result["typed"]["success"] is True
+        assert result["hotkey"]["success"] is True
+        assert result["waited"]["success"] is True
+        assert result["clicked"]["success"] is True
+
+
+@pytest.mark.skipif(
+    not RUN_WINDOWS_CONCURRENT_TESTS,
+    reason=(
+        "Set SKULDBOT_WINDOWS_CONCURRENT_VISUAL_INTEGRATION=1 on a Windows host "
+        "with two active robot sessions and the host service running."
+    ),
+)
+def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(tmp_path):
+    if sys.platform != "win32":
+        pytest.skip("Windows concurrent visual integration requires Windows.")
+    pytest.importorskip("RPA.Desktop")
+
+    slots = slots_from_environment(os.environ)
+    if len(slots) < 2:
+        pytest.skip("Configure at least two Windows session pool slots.")
+
+    pool = WindowsInteractiveSessionPool(slots=slots[:2], base_environment=os.environ)
+    run_ids = ("run-windows-a", "run-windows-b")
+    actions = ("screenshot", "type_text", "hotkey", "image_click", "wait_image")
+
+    with ExitStack() as stack:
+        leases = [stack.enter_context(pool.acquire(run_id)) for run_id in run_ids]
+        processes: list[subprocess.Popen[str]] = []
+        artifact_paths = []
+
+        for run_id, lease in zip(run_ids, leases, strict=True):
+            artifact_path = tmp_path / run_id / "screen.png"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_paths.append(artifact_path)
+            display_lease = _display_lease(
+                *actions,
+                run_id=run_id,
+                runtime_plane="windows_interactive",
+                mode="unattended",
+            )
+            env = dict(os.environ)
+            env.update(lease.environment)
+            env.update(build_display_lease_environment(display_lease))
+            env["SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED"] = "false"
+            processes.append(
+                subprocess.Popen(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-m",
+                        "skuldbot_runner.windows_session_broker",
+                        "--session-id",
+                        lease.slot.session_id,
+                        "--robot-user-ref",
+                        lease.slot.robot_user_ref,
+                        "--credential-ref-key",
+                        lease.slot.credential_ref_key,
+                        "--",
+                        sys.executable,
+                        "-c",
+                        VISUAL_RUNNER_SCRIPT,
+                        str(artifact_path),
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=45)
+            assert process.returncode == 0, stderr
+            results.append(json.loads(stdout))
+
+    assert leases[0].slot.session_id != leases[1].slot.session_id
+    assert leases[0].slot.robot_user_ref != leases[1].slot.robot_user_ref
+    assert artifact_paths[0] != artifact_paths[1]
+    assert {result["sessionId"] for result in results} == {
+        lease.slot.session_id for lease in leases
+    }
+    assert {result["robotUserRef"] for result in results} == {
+        lease.slot.robot_user_ref for lease in leases
+    }
+    for result, artifact_path in zip(results, artifact_paths, strict=True):
+        assert result["attached"] == "1"
         screenshot = result["screenshot"]
         assert screenshot["success"] is True
         assert screenshot["artifactPath"] == str(artifact_path)

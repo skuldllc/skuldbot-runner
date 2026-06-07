@@ -20,6 +20,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from .windows_native_launcher import _WORKER_ENV_ALLOWLIST
 from .windows_session_pool import WindowsSessionSlot, slots_from_environment
 
 _NATIVE_LAUNCHER_KEY = "SKULDBOT_WINDOWS_SESSION_NATIVE_LAUNCHER_COMMAND"
@@ -37,7 +38,7 @@ _LAUNCHER_ENV_ALLOWLIST = {
     "TMP",
     "USERPROFILE",
     "WINDIR",
-}
+} | _WORKER_ENV_ALLOWLIST
 
 
 class WindowsSessionBrokerError(RuntimeError):
