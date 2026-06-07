@@ -24,6 +24,10 @@ logger = structlog.get_logger()
 
 # Type for progress callback
 ProgressCallback = Callable[[StepProgress | LogEntry], Awaitable[None]]
+WINDOWS_SESSION_ID_ENV = "SKULDBOT_WINDOWS_SESSION_ID"
+WINDOWS_BROKER_COMMAND_ENV = "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"
+WINDOWS_ROBOT_USER_REF_ENV = "SKULDBOT_WINDOWS_ROBOT_USER_REF"
+WINDOWS_CREDENTIAL_REF_KEY_ENV = "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY"
 
 
 class BotExecutor:
@@ -378,22 +382,16 @@ class BotExecutor:
 
         env = self._build_runtime_worker_environment(job, execution_environment)
 
+        command = self._build_runtime_worker_command(
+            extract_dir=extract_dir,
+            inputs_path=inputs_path,
+            result_path=result_path,
+            job=job,
+        )
+        command = self._wrap_windows_session_broker_command(command, env)
+
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "skuldbot_runner.runtime_worker",
-            "--package-dir",
-            str(extract_dir),
-            "--inputs-json",
-            str(inputs_path),
-            "--result-json",
-            str(result_path),
-            "--execution-id",
-            job.id,
-            "--bot-id",
-            job.bot_id or job.id,
-            "--bot-name",
-            job.bot_name,
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -423,6 +421,69 @@ class BotExecutor:
 
         payload = json.loads(result_path.read_text(encoding="utf-8"))
         return _RuntimeResult(payload)
+
+    def _build_runtime_worker_command(
+        self,
+        *,
+        extract_dir: Path,
+        inputs_path: Path,
+        result_path: Path,
+        job: Job,
+    ) -> list[str]:
+        """Build the local runtime worker command."""
+
+        return [
+            sys.executable,
+            "-m",
+            "skuldbot_runner.runtime_worker",
+            "--package-dir",
+            str(extract_dir),
+            "--inputs-json",
+            str(inputs_path),
+            "--result-json",
+            str(result_path),
+            "--execution-id",
+            job.id,
+            "--bot-id",
+            job.bot_id or job.id,
+            "--bot-name",
+            job.bot_name,
+        ]
+
+    def _wrap_windows_session_broker_command(
+        self,
+        command: list[str],
+        env: dict[str, str],
+    ) -> list[str]:
+        """Route Windows session execution through the configured host broker."""
+
+        session_id = env.get(WINDOWS_SESSION_ID_ENV, "").strip()
+        if not session_id:
+            return command
+
+        broker_command = env.get(WINDOWS_BROKER_COMMAND_ENV, "").strip()
+        robot_user_ref = env.get(WINDOWS_ROBOT_USER_REF_ENV, "").strip()
+        credential_ref_key = env.get(WINDOWS_CREDENTIAL_REF_KEY_ENV, "").strip()
+        if not broker_command:
+            raise RuntimeError(
+                "Windows interactive session execution requires a broker command."
+            )
+        if not robot_user_ref or not credential_ref_key:
+            raise RuntimeError(
+                "Windows interactive session execution requires user and credential refs."
+            )
+
+        return [
+            broker_command,
+            "--session-id",
+            session_id,
+            "--robot-user-ref",
+            robot_user_ref,
+            "--credential-ref-key",
+            credential_ref_key,
+            "--",
+            *command,
+        ]
 
     def _build_runtime_worker_environment(
         self,

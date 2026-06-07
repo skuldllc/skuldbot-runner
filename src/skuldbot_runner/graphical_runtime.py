@@ -36,6 +36,7 @@ _WINDOWS_SESSION_POOL_ENV_KEYS = (
     "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL",
 )
 _WINDOWS_SESSION_BROKER_ENABLED = "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED"
+_WINDOWS_SESSION_BROKER_COMMAND = "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"
 _WINDOWS_DEDICATED_SESSION_ISOLATION = "dedicated_user_session"
 _PLAINTEXT_SECRET_KEYS = {
     "password",
@@ -343,6 +344,8 @@ def windows_session_pool_capacity_from_environment(env: Mapping[str, str]) -> in
     """Return validated Windows pool slot count from explicit runner configuration."""
 
     if not _read_bool(env.get(_WINDOWS_SESSION_BROKER_ENABLED)):
+        return 0
+    if not env.get(_WINDOWS_SESSION_BROKER_COMMAND, "").strip():
         return 0
 
     if not _read_bool(env.get("SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED")):

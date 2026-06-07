@@ -54,6 +54,7 @@ _SESSION_POOL_KEYS = (
     "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON",
     "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL",
 )
+_BROKER_COMMAND_KEY = "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"
 _DEDICATED_USER_SESSION = "dedicated_user_session"
 _PLAINTEXT_SECRET_KEYS = {
     "password",
@@ -78,7 +79,9 @@ def should_enable_windows_session_pool(
     if system != "windows":
         return False
 
-    return _read_bool(env.get("SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED"))
+    return _read_bool(env.get("SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED")) and bool(
+        env.get(_BROKER_COMMAND_KEY, "").strip()
+    )
 
 
 def slots_from_environment(
@@ -197,6 +200,9 @@ class WindowsInteractiveSessionPool:
         )
         environment["SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF"] = (
             slot.isolation.downloads_root_ref or ""
+        )
+        environment["SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"] = (
+            self.base_environment.get(_BROKER_COMMAND_KEY, "").strip()
         )
         return environment
 

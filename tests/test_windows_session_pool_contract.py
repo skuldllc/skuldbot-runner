@@ -47,7 +47,10 @@ def _slots(*session_ids: str):
 def test_windows_session_pool_requires_windows_broker_opt_in():
     assert (
         should_enable_windows_session_pool(
-            environment={"SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true"},
+            environment={
+                "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+                "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
+            },
             platform_system="Linux",
         )
         is False
@@ -55,6 +58,16 @@ def test_windows_session_pool_requires_windows_broker_opt_in():
     assert (
         should_enable_windows_session_pool(
             environment={"SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true"},
+            platform_system="Windows",
+        )
+        is False
+    )
+    assert (
+        should_enable_windows_session_pool(
+            environment={
+                "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+                "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
+            },
             platform_system="Windows",
         )
         is True
@@ -109,7 +122,9 @@ def test_windows_session_pool_parses_only_valid_dedicated_slots():
 def test_windows_session_pool_allocates_distinct_slots_and_reuses_after_release():
     pool = WindowsInteractiveSessionPool(
         slots=_slots("session-1", "session-2"),
-        base_environment={},
+        base_environment={
+            "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker"
+        },
     )
 
     assert pool.max_sessions == 2
@@ -121,6 +136,9 @@ def test_windows_session_pool_allocates_distinct_slots_and_reuses_after_release(
         assert lease_a.environment["SKULDBOT_WINDOWS_SESSION_ID"] == "session-1"
         assert lease_a.environment["SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY"] == (
             "vault-key-session-1"
+        )
+        assert lease_a.environment["SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND"] == (
+            "skuldbot-win-broker"
         )
         assert pool.active_count == 1
         assert pool.available_count == 1

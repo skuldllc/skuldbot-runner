@@ -217,6 +217,7 @@ def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
         "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
         "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": (
             _windows_session_pool("session-1", "session-2")
         ),
@@ -271,6 +272,7 @@ def test_windows_session_pool_flag_without_slots_does_not_declare_multi_session(
         "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
         "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
     }
     capability = build_graphical_capabilities(
         GraphicalProbeInput(
@@ -293,6 +295,7 @@ def test_windows_session_pool_rejects_malformed_pool_config():
         "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
         "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": "not-json",
     }
     capability = build_graphical_capabilities(
@@ -317,6 +320,7 @@ def test_windows_session_pool_rejects_plaintext_credentials():
         "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
         "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
             [
                 {
@@ -355,6 +359,7 @@ def test_windows_session_pool_requires_dedicated_input_and_clipboard_isolation()
         "SKULDBOT_MAX_GRAPHICAL_SESSIONS": "3",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_ENABLED": "true",
         "SKULDBOT_WINDOWS_SESSION_BROKER_ENABLED": "true",
+        "SKULDBOT_WINDOWS_SESSION_BROKER_COMMAND": "skuldbot-win-broker",
         "SKULDBOT_WINDOWS_INTERACTIVE_SESSION_POOL_JSON": json.dumps(
             [
                 {
