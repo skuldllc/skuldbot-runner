@@ -38,6 +38,11 @@ from .runner_capacity import (
     runner_can_claim_job_locally,
 )
 from .system_info import get_system_info
+from .windows_session_pool import (
+    WindowsInteractiveSessionPool,
+    should_enable_windows_session_pool,
+    slots_from_environment,
+)
 
 logger = structlog.get_logger()
 
@@ -68,6 +73,7 @@ class RunnerAgent:
         self._active_jobs: dict[str, Job] = {}
         self._job_tasks: set[asyncio.Task[None]] = set()
         self._linux_virtual_display_pool: LinuxVirtualDisplayPool | None = None
+        self._windows_session_pool: WindowsInteractiveSessionPool | None = None
 
     async def start(self):
         """Start the runner agent."""
@@ -82,6 +88,7 @@ class RunnerAgent:
 
         try:
             self._configure_linux_virtual_display_pool_if_requested()
+            self._configure_windows_session_pool_if_requested()
 
             # Register if we don't have an API key
             if not self.config.api_key:
@@ -113,6 +120,9 @@ class RunnerAgent:
         if self._linux_virtual_display_pool is not None:
             self._linux_virtual_display_pool.stop_all()
             self._linux_virtual_display_pool = None
+        if self._windows_session_pool is not None:
+            self._windows_session_pool.stop_all()
+            self._windows_session_pool = None
         await self.client.close()
         logger.info("Runner agent stopped")
 
@@ -129,6 +139,25 @@ class RunnerAgent:
         logger.info(
             "Linux virtual display pool configured",
             max_sessions=self.config.max_graphical_sessions,
+        )
+
+    def _configure_windows_session_pool_if_requested(self) -> None:
+        """Prepare configured Windows user sessions when the broker is enabled."""
+
+        if not should_enable_windows_session_pool():
+            return
+
+        slots = slots_from_environment()
+        if not slots:
+            logger.warning(
+                "Windows session broker is enabled but no valid session slots exist"
+            )
+            return
+
+        self._windows_session_pool = WindowsInteractiveSessionPool(slots=slots)
+        logger.info(
+            "Windows interactive session pool configured",
+            max_sessions=self._windows_session_pool.max_sessions,
         )
 
     async def _register(self):
@@ -214,11 +243,24 @@ class RunnerAgent:
             if self._linux_virtual_display_pool is not None
             else 0
         )
+        active_windows_sessions = (
+            self._windows_session_pool.active_count
+            if self._windows_session_pool is not None
+            else 0
+        )
         reserved_linux_virtual_display_slots = max(
             active_graphical_jobs - active_graphical_sessions,
             0,
         )
-        reserved_windows_interactive_slots = 0
+        active_windows_jobs = sum(
+            1
+            for active_job in self._active_jobs.values()
+            if job_requires_windows_interactive(active_job)
+        )
+        reserved_windows_interactive_slots = max(
+            active_windows_jobs - active_windows_sessions,
+            0,
+        )
         for job in jobs:
             if remaining_capacity <= 0:
                 break
@@ -232,7 +274,16 @@ class RunnerAgent:
                 max_concurrent_jobs=self.config.max_concurrent_jobs,
                 linux_virtual_display_pool=self._linux_virtual_display_pool,
                 reserved_linux_virtual_display_slots=reserved_linux_virtual_display_slots,
-                windows_interactive_slots_available=0,
+                active_windows_interactive_sessions=(
+                    self._windows_session_pool.active_count
+                    if self._windows_session_pool is not None
+                    else 0
+                ),
+                max_windows_interactive_sessions=(
+                    self._windows_session_pool.max_sessions
+                    if self._windows_session_pool is not None
+                    else 0
+                ),
                 reserved_windows_interactive_slots=reserved_windows_interactive_slots,
             ):
                 logger.debug(
@@ -286,6 +337,18 @@ class RunnerAgent:
                         job=job,
                         package_path=package_path,
                         execution_environment=display_lease.environment,
+                        on_progress=lambda entry: self._handle_progress(entry, job.id),
+                    )
+            elif self._requires_windows_interactive(job):
+                if self._windows_session_pool is None:
+                    raise RuntimeError(
+                        "Run requires windows_interactive but no session pool is configured."
+                    )
+                with self._windows_session_pool.acquire(job.id) as session_lease:
+                    result = await self.executor.execute(
+                        job=job,
+                        package_path=package_path,
+                        execution_environment=session_lease.environment,
                         on_progress=lambda entry: self._handle_progress(entry, job.id),
                     )
             else:
@@ -364,17 +427,35 @@ class RunnerAgent:
 
     def _detect_graphical_capabilities(self):
         pool = self._linux_virtual_display_pool
+        windows_pool = self._windows_session_pool
         return build_graphical_capabilities(
             GraphicalProbeInput(
                 platform_system=platform.system(),
                 environment=os.environ,
                 max_graphical_sessions=(
-                    pool.max_sessions if pool is not None else self.config.max_graphical_sessions
+                    pool.max_sessions
+                    if pool is not None
+                    else (
+                        windows_pool.max_sessions
+                        if windows_pool is not None
+                        else self.config.max_graphical_sessions
+                    )
                 ),
-                current_graphical_sessions=pool.active_count if pool is not None else 0,
+                current_graphical_sessions=(
+                    pool.active_count
+                    if pool is not None
+                    else (windows_pool.active_count if windows_pool is not None else 0)
+                ),
+                windows_session_pool_capacity=(
+                    windows_pool.max_sessions if windows_pool is not None else 0
+                ),
             )
         )
 
     @staticmethod
     def _requires_linux_virtual_display(job: Job) -> bool:
         return job_requires_linux_virtual_display(job)
+
+    @staticmethod
+    def _requires_windows_interactive(job: Job) -> bool:
+        return job_requires_windows_interactive(job)

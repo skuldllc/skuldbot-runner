@@ -153,7 +153,8 @@ def test_runner_claim_capacity_rejects_windows_job_without_session_pool_slot():
             active_jobs=0,
             max_concurrent_jobs=2,
             linux_virtual_display_pool=None,
-            windows_interactive_slots_available=0,
+            active_windows_interactive_sessions=0,
+            max_windows_interactive_sessions=0,
         )
         is False
     )
@@ -173,7 +174,8 @@ def test_runner_claim_capacity_reserves_windows_slots_before_claiming():
             active_jobs=0,
             max_concurrent_jobs=3,
             linux_virtual_display_pool=None,
-            windows_interactive_slots_available=2,
+            active_windows_interactive_sessions=0,
+            max_windows_interactive_sessions=2,
             reserved_windows_interactive_slots=0,
         )
         is True
@@ -184,7 +186,8 @@ def test_runner_claim_capacity_reserves_windows_slots_before_claiming():
             active_jobs=1,
             max_concurrent_jobs=3,
             linux_virtual_display_pool=None,
-            windows_interactive_slots_available=2,
+            active_windows_interactive_sessions=0,
+            max_windows_interactive_sessions=2,
             reserved_windows_interactive_slots=1,
         )
         is True
@@ -195,8 +198,41 @@ def test_runner_claim_capacity_reserves_windows_slots_before_claiming():
             active_jobs=2,
             max_concurrent_jobs=3,
             linux_virtual_display_pool=None,
-            windows_interactive_slots_available=2,
+            active_windows_interactive_sessions=0,
+            max_windows_interactive_sessions=2,
             reserved_windows_interactive_slots=2,
+        )
+        is False
+    )
+
+
+def test_runner_claim_capacity_counts_active_windows_sessions():
+    job = Job(
+        id="run-windows",
+        display_lease=_display_lease("windows_interactive"),
+    )
+
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=1,
+            max_concurrent_jobs=3,
+            linux_virtual_display_pool=None,
+            active_windows_interactive_sessions=1,
+            max_windows_interactive_sessions=2,
+            reserved_windows_interactive_slots=0,
+        )
+        is True
+    )
+    assert (
+        runner_can_claim_job_locally(
+            job,
+            active_jobs=2,
+            max_concurrent_jobs=3,
+            linux_virtual_display_pool=None,
+            active_windows_interactive_sessions=1,
+            max_windows_interactive_sessions=2,
+            reserved_windows_interactive_slots=1,
         )
         is False
     )
