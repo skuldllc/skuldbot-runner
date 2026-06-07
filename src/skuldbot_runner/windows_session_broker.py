@@ -23,16 +23,21 @@ from dataclasses import dataclass
 from .windows_session_pool import WindowsSessionSlot, slots_from_environment
 
 _NATIVE_LAUNCHER_KEY = "SKULDBOT_WINDOWS_SESSION_NATIVE_LAUNCHER_COMMAND"
-_ALLOWED_SENSITIVE_ENV_KEYS = {
-    "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY",
+_LAUNCHER_ENV_ALLOWLIST = {
+    "ALLUSERSPROFILE",
+    "COMSPEC",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR",
 }
-_SENSITIVE_ENV_FRAGMENTS = (
-    "apikey",
-    "credentialvalue",
-    "password",
-    "secret",
-    "token",
-)
 
 
 class WindowsSessionBrokerError(RuntimeError):
@@ -144,20 +149,13 @@ class WindowsSessionBroker:
         return [name, cleaned] if cleaned else []
 
     def _build_launcher_environment(self) -> dict[str, str]:
-        """Return launcher environment without inherited plaintext secret material."""
+        """Return a minimal launcher environment with no inherited secret material."""
 
         return {
             key: value
             for key, value in self.environment.items()
-            if not self._is_sensitive_environment_key(key)
+            if key.upper() in _LAUNCHER_ENV_ALLOWLIST
         }
-
-    @staticmethod
-    def _is_sensitive_environment_key(key: str) -> bool:
-        if key in _ALLOWED_SENSITIVE_ENV_KEYS:
-            return False
-        normalized = "".join(ch for ch in key.lower() if ch.isalnum())
-        return any(fragment in normalized for fragment in _SENSITIVE_ENV_FRAGMENTS)
 
 
 def request_from_args(args: argparse.Namespace) -> WindowsSessionBrokerRequest:

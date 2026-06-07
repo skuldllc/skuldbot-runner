@@ -148,14 +148,21 @@ def test_windows_session_broker_rejects_empty_worker_command():
         assert "requires a worker command" in str(exc)
 
 
-def test_windows_session_broker_launcher_environment_strips_plaintext_secret_material():
+def test_windows_session_broker_launcher_environment_is_explicit_allowlist():
     env = {
         **_environment(),
         "SKULDBOT_SECRET_DATABASE": "raw-secret",
         "SKULDBOT_API_KEY": "skr_raw_api_key",
         "ACCESS_TOKEN": "raw-token",
+        "ENCRYPTION_MASTER_KEY": "MASTER-LEAK",
+        "SSH_PRIVATE_KEY": "PRIV-LEAK",
+        "SIGNING_KEY": "SIGN-LEAK",
+        "GH_PAT": "PAT-LEAK",
+        "AWS_ACCESS_KEY_ID": "AKID-LEAK",
+        "DATABASE_URL": "postgres://u:SUPERSECRETPW@h/db",
         "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY": "vault-key-1",
         "PATH": "/usr/bin",
+        "SystemRoot": "C:\\Windows",
     }
     broker = WindowsSessionBroker(environment=env, platform_system="Windows")
 
@@ -164,8 +171,15 @@ def test_windows_session_broker_launcher_environment_strips_plaintext_secret_mat
     assert "SKULDBOT_SECRET_DATABASE" not in launcher_env
     assert "SKULDBOT_API_KEY" not in launcher_env
     assert "ACCESS_TOKEN" not in launcher_env
-    assert launcher_env["SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY"] == "vault-key-1"
+    assert "ENCRYPTION_MASTER_KEY" not in launcher_env
+    assert "SSH_PRIVATE_KEY" not in launcher_env
+    assert "SIGNING_KEY" not in launcher_env
+    assert "GH_PAT" not in launcher_env
+    assert "AWS_ACCESS_KEY_ID" not in launcher_env
+    assert "DATABASE_URL" not in launcher_env
+    assert "SKULDBOT_WINDOWS_SESSION_CREDENTIAL_REF_KEY" not in launcher_env
     assert launcher_env["PATH"] == "/usr/bin"
+    assert launcher_env["SystemRoot"] == "C:\\Windows"
 
 
 def test_windows_session_broker_cli_request_keeps_separator_out_of_worker_command():
