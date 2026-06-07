@@ -140,8 +140,7 @@ class PyWin32SessionProcessAdapter:
             )
             primary_token = win32security.DuplicateTokenEx(
                 token,
-                win32con.MAXIMUM_ALLOWED,
-                None,
+                0,
                 win32security.SecurityImpersonation,
                 win32security.TokenPrimary,
             )
