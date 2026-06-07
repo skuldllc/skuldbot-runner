@@ -125,6 +125,23 @@ def test_windows_native_launcher_rejects_service_denial():
         assert "session is locked" in str(exc)
 
 
+def test_windows_native_launcher_rejects_non_boolean_accepted_response():
+    for accepted in ("false", 1, None):
+        def transport(_pipe_name: str, _payload: dict):
+            return {"accepted": accepted, "exitCode": 0}
+
+        launcher = WindowsNativeLauncher(
+            platform_system="Windows",
+            transport=transport,
+        )
+
+        try:
+            launcher.run(_request())
+            raise AssertionError(f"native launcher should reject accepted={accepted!r}")
+        except WindowsNativeLauncherError as exc:
+            assert "rejected request" in str(exc)
+
+
 def test_windows_native_launcher_rejects_missing_exit_code():
     def transport(_pipe_name: str, _payload: dict):
         return {"accepted": True}
@@ -139,6 +156,23 @@ def test_windows_native_launcher_rejects_missing_exit_code():
         raise AssertionError("native launcher should require exitCode")
     except WindowsNativeLauncherError as exc:
         assert "exitCode" in str(exc)
+
+
+def test_windows_native_launcher_rejects_non_integer_exit_code_response():
+    for exit_code in (False, True, 0.0):
+        def transport(_pipe_name: str, _payload: dict):
+            return {"accepted": True, "exitCode": exit_code}
+
+        launcher = WindowsNativeLauncher(
+            platform_system="Windows",
+            transport=transport,
+        )
+
+        try:
+            launcher.run(_request())
+            raise AssertionError(f"native launcher should reject exitCode={exit_code!r}")
+        except WindowsNativeLauncherError as exc:
+            assert "exitCode" in str(exc)
 
 
 def test_windows_native_launcher_cli_request_keeps_separator_out_of_worker_command():

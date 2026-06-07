@@ -89,12 +89,12 @@ class WindowsNativeLauncher:
 
         payload = self.build_request_payload(request)
         response = self.transport(pipe_name, payload)
-        if not bool(response.get("accepted")):
+        if response.get("accepted") is not True:
             reason = _read_string(response.get("reason")) or "request rejected"
             raise WindowsNativeLauncherError(f"Windows native launcher rejected request: {reason}")
 
         exit_code = response.get("exitCode")
-        if not isinstance(exit_code, int):
+        if type(exit_code) is not int:
             raise WindowsNativeLauncherError(
                 "Windows native launcher response did not include an exitCode."
             )
