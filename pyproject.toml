@@ -57,6 +57,7 @@ skuldbot-runner = "skuldbot_runner.cli:main"
 skuldbot-windows-session-broker = "skuldbot_runner.windows_session_broker:main"
 skuldbot-windows-native-launcher = "skuldbot_runner.windows_native_launcher:main"
 skuldbot-windows-host-service = "skuldbot_runner.windows_host_service:main"
+skuldbot-windows-host-service-manager = "skuldbot_runner.windows_host_service_manager:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skuldbot_runner"]

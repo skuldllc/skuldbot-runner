@@ -279,7 +279,12 @@ class PyWin32NamedPipeHost:
     def __init__(self, pipe_name: str = _DEFAULT_PIPE_NAME) -> None:
         self.pipe_name = pipe_name
 
-    def serve_forever(self, service: WindowsHostService) -> None:
+    def serve_forever(
+        self,
+        service: WindowsHostService,
+        *,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> None:
         if platform.system().lower() != "windows":
             raise WindowsHostServiceError("Windows named-pipe host requires Windows.")
         try:
@@ -290,7 +295,7 @@ class PyWin32NamedPipeHost:
                 "pywin32 is required for the Windows named-pipe host."
             ) from exc
 
-        while True:
+        while not (stop_requested and stop_requested()):
             pipe = win32pipe.CreateNamedPipe(
                 self.pipe_name,
                 win32pipe.PIPE_ACCESS_DUPLEX,
@@ -305,6 +310,8 @@ class PyWin32NamedPipeHost:
             )
             try:
                 win32pipe.ConnectNamedPipe(pipe, None)
+                if stop_requested and stop_requested():
+                    continue
                 _, data = win32file.ReadFile(pipe, 65536)
                 response = response_from_request_bytes(service, data)
                 response_line = json.dumps(response, separators=(",", ":")) + "\n"
@@ -312,6 +319,17 @@ class PyWin32NamedPipeHost:
             finally:
                 win32pipe.DisconnectNamedPipe(pipe)
                 win32file.CloseHandle(pipe)
+
+    def request_stop(self) -> None:
+        """Best-effort wake-up for a service stop request."""
+
+        if platform.system().lower() != "windows":
+            return
+        try:
+            with open(self.pipe_name, "r+b", buffering=0) as pipe:
+                pipe.write(b"{}\n")
+        except OSError:
+            return
 
 
 def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dict[str, Any]:
