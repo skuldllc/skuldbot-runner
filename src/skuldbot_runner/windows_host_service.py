@@ -206,7 +206,9 @@ class PyWin32SessionProcessAdapter:
         except WindowsHostServiceError:
             raise
         except Exception as exc:
-            raise WindowsHostServiceError("Windows process launch failed.") from exc
+            raise WindowsHostServiceError(
+                f"Windows process launch failed: {exc}"
+            ) from exc
 
     @staticmethod
     def _verify_session_user(
