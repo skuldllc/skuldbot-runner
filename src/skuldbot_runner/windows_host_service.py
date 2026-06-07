@@ -103,7 +103,7 @@ class WindowsHostService:
 
 
 class PyWin32SessionProcessAdapter:
-    """Windows adapter using pywin32 LogonUser/CreateProcessAsUser."""
+    """Windows adapter using pywin32 WTSQueryUserToken/CreateProcessAsUser."""
 
     def __init__(self, *, platform_system: str | None = None, timeout_seconds: int = 3600) -> None:
         self.platform_system = (platform_system or platform.system()).lower()
@@ -124,30 +124,20 @@ class PyWin32SessionProcessAdapter:
             import win32process
             import win32profile
             import win32security
+            import win32ts
         except ImportError as exc:
             raise WindowsHostServiceError(
                 "pywin32 is required for the Windows host service."
             ) from exc
 
-        domain = credential.domain or "."
         try:
-            token = win32security.LogonUser(
-                credential.username,
-                domain,
-                credential.password,
-                win32con.LOGON32_LOGON_INTERACTIVE,
-                win32con.LOGON32_PROVIDER_DEFAULT,
-            )
+            token = win32ts.WTSQueryUserToken(session_id)
+            self._verify_session_user(token, credential, win32security)
             primary_token = win32security.DuplicateTokenEx(
                 token,
                 0,
                 win32security.SecurityImpersonation,
                 win32security.TokenPrimary,
-            )
-            win32security.SetTokenInformation(
-                primary_token,
-                win32security.TokenSessionId,
-                session_id,
             )
             environment = win32profile.CreateEnvironmentBlock(primary_token, False)
             startup = win32process.STARTUPINFO()
@@ -180,6 +170,26 @@ class PyWin32SessionProcessAdapter:
             raise
         except Exception as exc:
             raise WindowsHostServiceError("Windows process launch failed.") from exc
+
+    @staticmethod
+    def _verify_session_user(
+        token: Any,
+        credential: WindowsRobotCredential,
+        win32security: Any,
+    ) -> None:
+        """Ensure the assigned Windows session belongs to the expected robot user."""
+
+        token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
+        account_name, domain_name, _account_type = win32security.LookupAccountSid(
+            None,
+            token_user[0],
+        )
+        if not session_user_matches_credential(
+            account_name=account_name,
+            domain_name=domain_name,
+            credential=credential,
+        ):
+            raise WindowsHostServiceError("Windows session user does not match credentialRef.")
 
 
 class PyWin32NamedPipeHost:
@@ -294,6 +304,21 @@ def resolve_robot_credential(
     password = _read_required_string(payload.get("password"), "password")
     domain = _read_optional_string(payload.get("domain"), "domain")
     return WindowsRobotCredential(username=username, password=password, domain=domain)
+
+
+def session_user_matches_credential(
+    *,
+    account_name: str,
+    domain_name: str,
+    credential: WindowsRobotCredential,
+) -> bool:
+    """Return true when a Windows session identity matches the credential ref."""
+
+    if account_name.lower() != credential.username.lower():
+        return False
+    if credential.domain and credential.domain != ".":
+        return domain_name.lower() == credential.domain.lower()
+    return True
 
 
 def resolve_secret_value(secret_ref_key: str) -> str | None:

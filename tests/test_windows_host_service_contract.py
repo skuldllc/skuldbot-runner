@@ -12,9 +12,11 @@ from skuldbot_runner.windows_host_service import (
     WindowsHostLaunchRequest,
     WindowsHostService,
     WindowsHostServiceError,
+    WindowsRobotCredential,
     parse_launch_payload,
     resolve_robot_credential,
     response_from_request_bytes,
+    session_user_matches_credential,
 )
 
 
@@ -126,6 +128,39 @@ def test_windows_host_service_rejects_unresolved_or_malformed_credential_ref():
             raise AssertionError("host service should reject invalid credential secret")
         except WindowsHostServiceError:
             pass
+
+
+def test_windows_session_identity_must_match_credential_ref():
+    credential = WindowsRobotCredential(
+        username="robot-user",
+        password="secret-password",
+        domain="ACME",
+    )
+
+    assert session_user_matches_credential(
+        account_name="robot-user",
+        domain_name="ACME",
+        credential=credential,
+    )
+    assert not session_user_matches_credential(
+        account_name="other-user",
+        domain_name="ACME",
+        credential=credential,
+    )
+    assert not session_user_matches_credential(
+        account_name="robot-user",
+        domain_name="OTHER",
+        credential=credential,
+    )
+    assert session_user_matches_credential(
+        account_name="robot-user",
+        domain_name="LOCALHOST",
+        credential=WindowsRobotCredential(
+            username="robot-user",
+            password="secret-password",
+            domain=".",
+        ),
+    )
 
 
 def test_windows_host_service_handles_payload_without_leaking_password():
