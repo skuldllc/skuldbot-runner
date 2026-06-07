@@ -29,6 +29,7 @@ from .windows_native_launcher import _DEFAULT_PIPE_NAME, _WORKER_ENV_ALLOWLIST
 _PROTOCOL_VERSION = 1
 _WINDOWS_INTERACTIVE = "windows_interactive"
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_LOGON_WITH_PROFILE = 0x00000001
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _WORKER_SYSTEM_ENV_ALLOWLIST = {
     "ALLUSERSPROFILE",
@@ -272,7 +273,7 @@ class PyWin32SessionProcessAdapter:
         environment = _build_worker_environment_block(worker_environment)
         created = advapi32.CreateProcessWithTokenW(
             token_handle,
-            0,
+            _LOGON_WITH_PROFILE,
             None,
             mutable_command,
             _CREATE_UNICODE_ENVIRONMENT,
