@@ -52,6 +52,7 @@ all = [
 [project.scripts]
 skuldbot-runner = "skuldbot_runner.cli:main"
 skuldbot-windows-session-broker = "skuldbot_runner.windows_session_broker:main"
+skuldbot-windows-native-launcher = "skuldbot_runner.windows_native_launcher:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skuldbot_runner"]
