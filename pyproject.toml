@@ -34,6 +34,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+windows = [
+    "pywin32>=306; platform_system == 'Windows'",
+]
 vault = [
     "hvac>=2.0.0",            # HashiCorp Vault client
     "boto3>=1.34.0",          # AWS Secrets Manager
@@ -46,13 +49,14 @@ dev = [
     "ruff>=0.1.0",
 ]
 all = [
-    "skuldbot-runner[vault,dev]",
+    "skuldbot-runner[vault,dev,windows]",
 ]
 
 [project.scripts]
 skuldbot-runner = "skuldbot_runner.cli:main"
 skuldbot-windows-session-broker = "skuldbot_runner.windows_session_broker:main"
 skuldbot-windows-native-launcher = "skuldbot_runner.windows_native_launcher:main"
+skuldbot-windows-host-service = "skuldbot_runner.windows_host_service:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skuldbot_runner"]
