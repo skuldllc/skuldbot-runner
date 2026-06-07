@@ -188,9 +188,10 @@ class PyWin32SessionProcessAdapter:
             self._enable_required_privileges(win32api, win32con, win32security)
             token = win32ts.WTSQueryUserToken(session_id)
             self._verify_session_user(token, credential, win32security)
+            primary_token = self._duplicate_primary_token(token, win32con, win32security)
             command_line = subprocess.list2cmdline(request.command)
             process_handle = self._create_process_with_token(
-                int(token),
+                int(primary_token),
                 command_line,
                 request.worker_environment or {},
             )
@@ -250,6 +251,18 @@ class PyWin32SessionProcessAdapter:
             luid = win32security.LookupPrivilegeValue(None, privilege_name)
             adjustments.append((luid, win32con.SE_PRIVILEGE_ENABLED))
         win32security.AdjustTokenPrivileges(process_token, False, adjustments)
+
+    @staticmethod
+    def _duplicate_primary_token(token: Any, win32con: Any, win32security: Any) -> Any:
+        """Duplicate the WTS token into a primary token suitable for process creation."""
+
+        return win32security.DuplicateTokenEx(
+            token,
+            win32con.MAXIMUM_ALLOWED,
+            None,
+            win32security.SecurityImpersonation,
+            win32security.TokenPrimary,
+        )
 
     @staticmethod
     def _create_process_with_token(
