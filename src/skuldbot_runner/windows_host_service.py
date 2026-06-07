@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import json
 import platform
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -28,6 +30,38 @@ _WINDOWS_INTERACTIVE = "windows_interactive"
 
 class WindowsHostServiceError(RuntimeError):
     """Raised when a host-service request cannot be handled safely."""
+
+
+class _CtypesStartupInfo(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("lpReserved", wintypes.LPWSTR),
+        ("lpDesktop", wintypes.LPWSTR),
+        ("lpTitle", wintypes.LPWSTR),
+        ("dwX", wintypes.DWORD),
+        ("dwY", wintypes.DWORD),
+        ("dwXSize", wintypes.DWORD),
+        ("dwYSize", wintypes.DWORD),
+        ("dwXCountChars", wintypes.DWORD),
+        ("dwYCountChars", wintypes.DWORD),
+        ("dwFillAttribute", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("wShowWindow", wintypes.WORD),
+        ("cbReserved2", wintypes.WORD),
+        ("lpReserved2", ctypes.c_void_p),
+        ("hStdInput", wintypes.HANDLE),
+        ("hStdOutput", wintypes.HANDLE),
+        ("hStdError", wintypes.HANDLE),
+    ]
+
+
+class _CtypesProcessInformation(ctypes.Structure):
+    _fields_ = [
+        ("hProcess", wintypes.HANDLE),
+        ("hThread", wintypes.HANDLE),
+        ("dwProcessId", wintypes.DWORD),
+        ("dwThreadId", wintypes.DWORD),
+    ]
 
 
 @dataclass(frozen=True)
@@ -119,10 +153,9 @@ class PyWin32SessionProcessAdapter:
 
         session_id = _read_positive_int(request.session_id, "sessionId")
         try:
+            import win32api
             import win32con
             import win32event
-            import win32process
-            import win32profile
             import win32security
             import win32ts
         except ImportError as exc:
@@ -131,38 +164,22 @@ class PyWin32SessionProcessAdapter:
             ) from exc
 
         try:
+            self._enable_required_privileges(win32api, win32con, win32security)
             token = win32ts.WTSQueryUserToken(session_id)
             self._verify_session_user(token, credential, win32security)
-            primary_token = win32security.DuplicateTokenEx(
-                token,
-                0,
-                win32security.SecurityImpersonation,
-                win32security.TokenPrimary,
-            )
-            environment = win32profile.CreateEnvironmentBlock(primary_token, False)
-            startup = win32process.STARTUPINFO()
-            startup.lpDesktop = r"winsta0\default"
             command_line = subprocess.list2cmdline(request.command)
-            process_info = win32process.CreateProcessAsUser(
-                primary_token,
-                None,
+            process_handle = self._create_process_with_token(
+                int(token),
                 command_line,
-                None,
-                None,
-                False,
-                win32con.CREATE_UNICODE_ENVIRONMENT,
-                environment,
-                None,
-                startup,
+                win32event,
             )
-            process_handle = process_info[0]
             wait_result = win32event.WaitForSingleObject(
                 process_handle,
                 self.timeout_seconds * 1000,
             )
             if wait_result == win32con.WAIT_TIMEOUT:
                 raise WindowsHostServiceError("Windows worker process timed out.")
-            exit_code = win32process.GetExitCodeProcess(process_handle)
+            exit_code = self._get_process_exit_code(process_handle)
             if type(exit_code) is not int:
                 raise WindowsHostServiceError("Windows worker exit code was invalid.")
             return exit_code
@@ -190,6 +207,70 @@ class PyWin32SessionProcessAdapter:
             credential=credential,
         ):
             raise WindowsHostServiceError("Windows session user does not match credentialRef.")
+
+    @staticmethod
+    def _enable_required_privileges(win32api: Any, win32con: Any, win32security: Any) -> None:
+        """Enable Windows privileges required to spawn workers in assigned sessions."""
+
+        process_token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(),
+            win32con.TOKEN_ADJUST_PRIVILEGES | win32con.TOKEN_QUERY,
+        )
+        required_privileges = (
+            "SeImpersonatePrivilege",
+            "SeAssignPrimaryTokenPrivilege",
+            "SeIncreaseQuotaPrivilege",
+            "SeTcbPrivilege",
+        )
+        adjustments = []
+        for privilege_name in required_privileges:
+            luid = win32security.LookupPrivilegeValue(None, privilege_name)
+            adjustments.append((luid, win32con.SE_PRIVILEGE_ENABLED))
+        win32security.AdjustTokenPrivileges(process_token, False, adjustments)
+
+    @staticmethod
+    def _create_process_with_token(
+        token_handle: int,
+        command_line: str,
+        win32event: Any,
+    ) -> int:
+        """Launch one command in the assigned session using advapi32.
+
+        pywin32 does not expose CreateProcessWithTokenW. The host service uses
+        the session token returned by WTSQueryUserToken and never passes robot
+        credentials to the launched worker environment.
+        """
+
+        advapi32, kernel32 = _load_windows_process_libraries()
+        startup_info = _CtypesStartupInfo()
+        startup_info.cb = ctypes.sizeof(startup_info)
+        startup_info.lpDesktop = r"winsta0\default"
+        process_info = _CtypesProcessInformation()
+        mutable_command = ctypes.create_unicode_buffer(command_line)
+        created = advapi32.CreateProcessWithTokenW(
+            token_handle,
+            0,
+            None,
+            mutable_command,
+            0,
+            None,
+            None,
+            ctypes.byref(startup_info),
+            ctypes.byref(process_info),
+        )
+        if not created:
+            raise ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(process_info.hThread)
+        return int(process_info.hProcess)
+
+    @staticmethod
+    def _get_process_exit_code(process_handle: int) -> int:
+        _advapi32, kernel32 = _load_windows_process_libraries()
+        exit_code = ctypes.wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(process_handle)
+        return int(exit_code.value)
 
 
 class PyWin32NamedPipeHost:
@@ -241,6 +322,31 @@ def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dic
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"accepted": False, "reason": "Windows host service request was invalid JSON."}
     return service.handle_payload(payload)
+
+
+def _load_windows_process_libraries() -> tuple[Any, Any]:
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.CreateProcessWithTokenW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_CtypesStartupInfo),
+        ctypes.POINTER(_CtypesProcessInformation),
+    ]
+    advapi32.CreateProcessWithTokenW.restype = wintypes.BOOL
+    kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return advapi32, kernel32
 
 
 def parse_launch_payload(payload: Mapping[str, Any]) -> WindowsHostLaunchRequest:
