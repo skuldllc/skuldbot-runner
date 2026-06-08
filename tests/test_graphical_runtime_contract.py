@@ -208,6 +208,7 @@ def test_windows_interactive_does_not_declare_multi_session_without_session_pool
     assert capability.supported_runtime_planes == [
         GraphicalRuntimePlane.WINDOWS_INTERACTIVE
     ]
+    assert capability.supported_session_modes == [GraphicalSessionMode.ATTENDED]
     assert capability.max_graphical_sessions == 1
 
 
@@ -236,6 +237,7 @@ def test_windows_interactive_session_pool_can_declare_multi_session_capacity():
     assert capability.supported_runtime_planes == [
         GraphicalRuntimePlane.WINDOWS_INTERACTIVE
     ]
+    assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
     assert capability.supported_session_modes == [GraphicalSessionMode.UNATTENDED]
     assert capability.max_graphical_sessions == 2
     assert VisualActionKind.IMAGE_CLICK in capability.supported_visual_actions

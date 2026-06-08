@@ -284,6 +284,8 @@ def _supported_modes_for(
     windows_pool_capacity: int = 0,
 ) -> list[GraphicalSessionMode]:
     if plane == GraphicalRuntimePlane.WINDOWS_INTERACTIVE:
+        if _read_bool(env.get("SKULDBOT_WINDOWS_SESSION_ATTACHED")):
+            return [GraphicalSessionMode.UNATTENDED]
         if windows_pool_capacity > 0:
             return [GraphicalSessionMode.UNATTENDED]
         return [GraphicalSessionMode.ATTENDED]
