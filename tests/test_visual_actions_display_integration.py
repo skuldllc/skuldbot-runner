@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +100,12 @@ def _display_lease(
     )
 
 
+def _read_optional_text(path: Path) -> str:
+    if not path.exists():
+        return "<missing>"
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 @pytest.mark.skipif(
     not RUN_DISPLAY_TESTS,
     reason="Set SKULDBOT_VISUAL_ACTION_INTEGRATION=1 with a real display.",
@@ -171,18 +178,22 @@ VISUAL_RUNNER_SCRIPT = r"""
 import json
 import os
 import sys
+import traceback
 
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
 
 artifact_path = sys.argv[1]
-keywords = SkuldBotVisualKeywords()
-screenshot = keywords.desktop_screenshot(artifact_path)
-typed = keywords.desktop_type_text("SkuldBot high density")
-hotkey = keywords.desktop_hotkey("ctrl", "a")
-waited = keywords.desktop_wait_image(artifact_path, timeout_seconds=3)
-clicked = keywords.desktop_image_click(artifact_path)
-print(
-    json.dumps(
+result_path = sys.argv[2] if len(sys.argv) > 2 else ""
+error_path = sys.argv[3] if len(sys.argv) > 3 else ""
+
+try:
+    keywords = SkuldBotVisualKeywords()
+    screenshot = keywords.desktop_screenshot(artifact_path)
+    typed = keywords.desktop_type_text("SkuldBot high density")
+    hotkey = keywords.desktop_hotkey("ctrl", "a")
+    waited = keywords.desktop_wait_image(artifact_path, timeout_seconds=3)
+    clicked = keywords.desktop_image_click(artifact_path)
+    payload = json.dumps(
         {
             "screenshot": screenshot,
             "typed": typed,
@@ -194,7 +205,18 @@ print(
             "attached": os.environ.get("SKULDBOT_WINDOWS_SESSION_ATTACHED", ""),
         }
     )
-)
+    if result_path:
+        os.makedirs(os.path.dirname(result_path), exist_ok=True)
+        with open(result_path, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    else:
+        print(payload)
+except Exception:
+    if error_path:
+        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+        with open(error_path, "w", encoding="utf-8") as handle:
+            handle.write(traceback.format_exc())
+    raise
 """
 
 
@@ -285,11 +307,23 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
         leases = [stack.enter_context(pool.acquire(run_id)) for run_id in run_ids]
         processes: list[subprocess.Popen[str]] = []
         artifact_paths = []
+        result_paths = []
+        error_paths = []
 
         for run_id, lease in zip(run_ids, leases, strict=True):
-            artifact_path = tmp_path / run_id / "screen.png"
+            session_temp_root = lease.slot.isolation.temp_root_ref
+            run_root = (
+                Path(session_temp_root) / run_id
+                if session_temp_root
+                else tmp_path / run_id
+            )
+            artifact_path = run_root / "screen.png"
+            result_path = run_root / "result.json"
+            error_path = run_root / "error.txt"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
             artifact_paths.append(artifact_path)
+            result_paths.append(result_path)
+            error_paths.append(error_path)
             display_lease = _display_lease(
                 *actions,
                 run_id=run_id,
@@ -317,6 +351,8 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
                         "-c",
                         VISUAL_RUNNER_SCRIPT,
                         str(artifact_path),
+                        str(result_path),
+                        str(error_path),
                     ],
                     env=env,
                     stdout=subprocess.PIPE,
@@ -326,14 +362,23 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
             )
 
         results = []
-        for process in processes:
+        for process, result_path, error_path in zip(
+            processes,
+            result_paths,
+            error_paths,
+            strict=True,
+        ):
             stdout, stderr = process.communicate(timeout=45)
             assert process.returncode == 0, (
                 f"visual worker failed with exit={process.returncode}\n"
+                f"result_path={result_path}\n"
+                f"error_path={error_path}\n"
+                f"result_file:\n{_read_optional_text(result_path)}\n"
+                f"error_file:\n{_read_optional_text(error_path)}\n"
                 f"stdout:\n{stdout}\n"
                 f"stderr:\n{stderr}"
             )
-            results.append(json.loads(stdout))
+            results.append(json.loads(result_path.read_text(encoding="utf-8")))
 
     assert leases[0].slot.session_id != leases[1].slot.session_id
     assert leases[0].slot.robot_user_ref != leases[1].slot.robot_user_ref
