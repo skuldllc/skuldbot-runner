@@ -17,6 +17,7 @@ from skuldbot_runner.windows_host_service import (
     WindowsRobotCredential,
     parse_launch_payload,
     resolve_robot_credential,
+    resolve_secret_value,
     response_from_request_bytes,
     session_user_matches_credential,
 )
@@ -143,6 +144,12 @@ def test_windows_host_service_resolves_robot_credential_from_secret_ref():
     assert credential.username == "robot-user"
     assert credential.password == "secret-password"
     assert credential.domain == "ACME"
+
+
+def test_windows_host_service_resolves_env_secret_without_async_manager(monkeypatch):
+    monkeypatch.setenv("SKULDBOT_SECRET_ROBOT1", "secret-json")
+
+    assert resolve_secret_value("robot1") == "secret-json"
 
 
 def test_windows_host_service_rejects_unresolved_or_malformed_credential_ref():

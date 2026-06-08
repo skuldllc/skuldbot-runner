@@ -666,6 +666,11 @@ def session_user_matches_credential(
 def resolve_secret_value(secret_ref_key: str) -> str | None:
     """Resolve a secretRef through the configured runner secrets manager."""
 
+    env_key = f"SKULDBOT_SECRET_{secret_ref_key.upper()}"
+    env_value = os.environ.get(env_key)
+    if env_value:
+        return env_value
+
     try:
         from .secrets.manager import get_secrets_manager
     except ImportError as exc:
