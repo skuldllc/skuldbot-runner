@@ -376,6 +376,49 @@ def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
     assert CapturingWin32Pipe.disconnected is True
 
 
+def test_windows_host_service_pipe_diagnostic_reason_redacts_sensitive_values(monkeypatch):
+    class FailingWin32File:
+        written = b""
+
+        @staticmethod
+        def ReadFile(_pipe, _size):
+            raise TypeError("password=alpha token:bravo secret=charlie key=delta")
+
+        @classmethod
+        def WriteFile(cls, _pipe, data):
+            cls.written = data
+
+        @staticmethod
+        def CloseHandle(_pipe):
+            return None
+
+    class CapturingWin32Pipe:
+        @staticmethod
+        def DisconnectNamedPipe(_pipe):
+            return None
+
+    monkeypatch.setenv("SKULDBOT_WINDOWS_HOST_SERVICE_DIAGNOSTIC_REASONS", "1")
+
+    PyWin32NamedPipeHost._handle_connected_pipe(
+        pipe=object(),
+        service=WindowsHostService(),
+        win32file=FailingWin32File,
+        win32pipe=CapturingWin32Pipe,
+    )
+
+    response = json.loads(FailingWin32File.written.decode("utf-8"))
+
+    assert response["accepted"] is False
+    assert response["reason"] == (
+        "Windows host service request failed: TypeError: "
+        "password=<redacted> token:<redacted> secret=<redacted> key=<redacted>"
+    )
+    assert "alpha" not in response["reason"]
+    assert "bravo" not in response["reason"]
+    assert "charlie" not in response["reason"]
+    assert "delta" not in response["reason"]
+
+
 def test_windows_host_service_real_attach_integration_env_gated():
     if os.environ.get("SKULDBOT_WINDOWS_HOST_SERVICE_INTEGRATION") != "1":
         pytest.skip("Set SKULDBOT_WINDOWS_HOST_SERVICE_INTEGRATION=1 on Windows.")

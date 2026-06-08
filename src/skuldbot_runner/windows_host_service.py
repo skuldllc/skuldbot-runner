@@ -16,6 +16,7 @@ import ctypes
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -31,6 +32,10 @@ _WINDOWS_INTERACTIVE = "windows_interactive"
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _INTERACTIVE_DESKTOP = "winsta0\\default"
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
+_DIAGNOSTIC_REASONS_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_DIAGNOSTIC_REASONS"
+_SENSITIVE_MESSAGE_PATTERN = re.compile(
+    r"(?i)(password|passwd|secret|token|credential|key)(\s*[=:]\s*)([^,;\s\"']+)"
+)
 _WORKER_SYSTEM_ENV_ALLOWLIST = {
     "ALLUSERSPROFILE",
     "COMSPEC",
@@ -391,7 +396,7 @@ class PyWin32NamedPipeHost:
             except Exception as exc:
                 response = {
                     "accepted": False,
-                    "reason": f"Windows host service request failed: {type(exc).__name__}",
+                    "reason": _unhandled_pipe_error_reason(exc),
                 }
             response_line = json.dumps(response, separators=(",", ":")) + "\n"
             win32file.WriteFile(pipe, response_line.encode("utf-8"))
@@ -446,6 +451,22 @@ def response_from_request_bytes(service: WindowsHostService, data: Any) -> dict[
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"accepted": False, "reason": "Windows host service request was invalid JSON."}
     return service.handle_payload(payload)
+
+
+def _unhandled_pipe_error_reason(exc: Exception) -> str:
+    """Build a fail-closed pipe error reason without exposing secret material."""
+
+    reason = f"Windows host service request failed: {type(exc).__name__}"
+    if os.environ.get(_DIAGNOSTIC_REASONS_ENV) != "1":
+        return reason
+
+    detail = str(exc).strip()
+    if not detail:
+        return reason
+    detail = _SENSITIVE_MESSAGE_PATTERN.sub(r"\1\2<redacted>", detail)
+    if len(detail) > 240:
+        detail = f"{detail[:237]}..."
+    return f"{reason}: {detail}"
 
 
 def _load_windows_process_libraries() -> tuple[Any, Any, Any]:
