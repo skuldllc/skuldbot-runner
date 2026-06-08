@@ -255,10 +255,17 @@ class PyWin32SessionProcessAdapter:
     def _duplicate_primary_token(token: Any, win32con: Any, win32security: Any) -> Any:
         """Duplicate the WTS token into a primary token suitable for process creation."""
 
+        required_access = (
+            win32con.TOKEN_ASSIGN_PRIMARY
+            | win32con.TOKEN_DUPLICATE
+            | win32con.TOKEN_QUERY
+            | win32con.TOKEN_ADJUST_DEFAULT
+            | win32con.TOKEN_ADJUST_SESSIONID
+        )
         return win32security.DuplicateTokenEx(
             token,
             win32security.SecurityImpersonation,
-            win32con.MAXIMUM_ALLOWED,
+            required_access,
             win32security.TokenPrimary,
         )
 
