@@ -287,6 +287,15 @@ def test_windows_host_service_uses_create_process_as_user_contract():
     assert "startup_info.lpDesktop = _INTERACTIVE_DESKTOP" in source
 
 
+def test_windows_host_service_stop_wakeup_uses_win32_named_pipe_client():
+    source = Path("src/skuldbot_runner/windows_host_service.py").read_text()
+
+    assert "def request_stop" in source
+    assert "win32file.CreateFile" in source
+    assert "win32file.WriteFile(pipe, b\"{}\\n\")" in source
+    assert "open(self.pipe_name" not in source
+
+
 def test_windows_host_service_real_attach_integration_env_gated():
     if os.environ.get("SKULDBOT_WINDOWS_HOST_SERVICE_INTEGRATION") != "1":
         pytest.skip("Set SKULDBOT_WINDOWS_HOST_SERVICE_INTEGRATION=1 on Windows.")

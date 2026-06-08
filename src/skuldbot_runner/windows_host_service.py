@@ -398,11 +398,29 @@ class PyWin32NamedPipeHost:
 
         if platform.system().lower() != "windows":
             return
+        pipe = None
         try:
-            with open(self.pipe_name, "r+b", buffering=0) as pipe:
-                pipe.write(b"{}\n")
-        except OSError:
+            import win32con
+            import win32file
+
+            pipe = win32file.CreateFile(
+                self.pipe_name,
+                win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+                0,
+                None,
+                win32con.OPEN_EXISTING,
+                0,
+                None,
+            )
+            win32file.WriteFile(pipe, b"{}\n")
+        except Exception:
             return
+        finally:
+            if pipe is not None:
+                try:
+                    win32file.CloseHandle(pipe)
+                except Exception:
+                    pass
 
 
 def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dict[str, Any]:
