@@ -2,6 +2,7 @@
 # Proprietary and confidential. Reverse engineering prohibited.
 
 import argparse
+from pathlib import Path
 
 from skuldbot_runner.windows_host_service_manager import (
     WindowsHostServiceManagerError,
@@ -32,6 +33,14 @@ def test_windows_host_service_manager_config_is_refs_only():
     assert "password" not in serialized
     assert "secret" not in serialized
     assert "token" not in serialized
+
+
+def test_windows_host_service_manager_supports_direct_pywin32_import_mode():
+    source = Path("src/skuldbot_runner/windows_host_service_manager.py").read_text()
+
+    assert "except ImportError" in source
+    assert "from skuldbot_runner.windows_host_service import" in source
+    assert "from skuldbot_runner.windows_native_launcher import" in source
 
 
 def test_windows_host_service_manager_rejects_secret_like_pipe_name():

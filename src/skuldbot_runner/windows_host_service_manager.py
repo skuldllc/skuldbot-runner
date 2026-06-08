@@ -19,8 +19,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .windows_host_service import PyWin32NamedPipeHost, WindowsHostService
-from .windows_native_launcher import _DEFAULT_PIPE_NAME
+try:
+    from .windows_host_service import PyWin32NamedPipeHost, WindowsHostService
+    from .windows_native_launcher import _DEFAULT_PIPE_NAME
+except ImportError:  # pragma: no cover - pywin32 service host may import this file directly.
+    from skuldbot_runner.windows_host_service import PyWin32NamedPipeHost, WindowsHostService
+    from skuldbot_runner.windows_native_launcher import _DEFAULT_PIPE_NAME
 
 _SERVICE_NAME = "SkuldBotWindowsHostService"
 _SERVICE_DISPLAY_NAME = "SkuldBot Windows Host Service"
