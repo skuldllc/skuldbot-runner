@@ -4,7 +4,6 @@
 import argparse
 
 from skuldbot_runner.windows_host_service_manager import (
-    _SERVICE_DESCRIPTION,
     WindowsHostServiceManagerError,
     _run_pywin32_service_command,
     build_service_module_arguments,
@@ -94,8 +93,6 @@ def test_windows_host_service_manager_places_pywin32_options_before_install(monk
     assert captured["argv"][1:] == [
         "--startup",
         "auto",
-        "--description",
-        _SERVICE_DESCRIPTION,
         "install",
     ]
 

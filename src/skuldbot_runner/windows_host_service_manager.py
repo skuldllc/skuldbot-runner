@@ -156,8 +156,6 @@ def _run_pywin32_service_command(config: WindowsHostServiceManagerConfig) -> int
             [
                 "--startup",
                 "auto",
-                "--description",
-                _SERVICE_DESCRIPTION,
             ]
         )
     command_argv.extend([*build_service_module_arguments(config), config.action])
