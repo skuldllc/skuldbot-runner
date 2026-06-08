@@ -29,7 +29,7 @@ from .windows_native_launcher import _DEFAULT_PIPE_NAME, _WORKER_ENV_ALLOWLIST
 _PROTOCOL_VERSION = 1
 _WINDOWS_INTERACTIVE = "windows_interactive"
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
-_LOGON_WITH_PROFILE = 0x00000001
+_INTERACTIVE_DESKTOP = "winsta0\\default"
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _WORKER_SYSTEM_ENV_ALLOWLIST = {
     "ALLUSERSPROFILE",
@@ -190,7 +190,7 @@ class PyWin32SessionProcessAdapter:
             self._verify_session_user(token, credential, win32security)
             primary_token = self._duplicate_primary_token(token, win32con, win32security)
             command_line = subprocess.list2cmdline(request.command)
-            process_handle = self._create_process_with_token(
+            process_handle = self._create_process_as_user(
                 int(primary_token),
                 command_line,
                 request.worker_environment or {},
@@ -271,21 +271,23 @@ class PyWin32SessionProcessAdapter:
         )
 
     @staticmethod
-    def _create_process_with_token(
+    def _create_process_as_user(
         token_handle: int,
         command_line: str,
         worker_environment: Mapping[str, str],
     ) -> int:
-        """Launch one command in the assigned session using advapi32.
+        """Launch one command in the assigned session using CreateProcessAsUserW.
 
-        pywin32 does not expose the flags Skuld needs consistently. The host service uses
-        the session token returned by WTSQueryUserToken and never passes robot
-        credentials to the launched worker environment.
+        This is the only supported high-density Windows attach path. Microsoft documents
+        CreateProcessWithTokenW as running in the caller session for Terminal Services;
+        Skuld must use CreateProcessAsUserW against the primary token for the assigned
+        robot session instead.
         """
 
         advapi32, kernel32, userenv = _load_windows_process_libraries()
         startup_info = _CtypesStartupInfo()
         startup_info.cb = ctypes.sizeof(startup_info)
+        startup_info.lpDesktop = _INTERACTIVE_DESKTOP
         process_info = _CtypesProcessInformation()
         mutable_command = ctypes.create_unicode_buffer(command_line)
         environment = _build_worker_environment_block(
@@ -293,11 +295,13 @@ class PyWin32SessionProcessAdapter:
             token_handle=token_handle,
             userenv=userenv,
         )
-        created = advapi32.CreateProcessWithTokenW(
+        created = advapi32.CreateProcessAsUserW(
             token_handle,
-            _LOGON_WITH_PROFILE,
             None,
             mutable_command,
+            None,
+            None,
+            False,
             _CREATE_UNICODE_ENVIRONMENT,
             environment,
             None,
@@ -415,18 +419,20 @@ def _load_windows_process_libraries() -> tuple[Any, Any, Any]:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     userenv = ctypes.WinDLL("userenv", use_last_error=True)
-    advapi32.CreateProcessWithTokenW.argtypes = [
+    advapi32.CreateProcessAsUserW.argtypes = [
         wintypes.HANDLE,
-        wintypes.DWORD,
         wintypes.LPCWSTR,
         wintypes.LPWSTR,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.BOOL,
         wintypes.DWORD,
         ctypes.c_void_p,
         wintypes.LPCWSTR,
         ctypes.POINTER(_CtypesStartupInfo),
         ctypes.POINTER(_CtypesProcessInformation),
     ]
-    advapi32.CreateProcessWithTokenW.restype = wintypes.BOOL
+    advapi32.CreateProcessAsUserW.restype = wintypes.BOOL
     kernel32.GetExitCodeProcess.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.DWORD),

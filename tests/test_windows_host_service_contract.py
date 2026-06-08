@@ -4,6 +4,7 @@
 import json
 import os
 import platform
+from pathlib import Path
 
 import pytest
 
@@ -275,6 +276,15 @@ def test_pywin32_adapter_rejects_non_windows_host_and_nonnumeric_session():
         raise AssertionError("adapter should require numeric Windows session id")
     except WindowsHostServiceError as exc:
         assert "sessionId must be numeric" in str(exc)
+
+
+def test_windows_host_service_uses_create_process_as_user_contract():
+    source = Path("src/skuldbot_runner/windows_host_service.py").read_text()
+
+    assert ".CreateProcessAsUserW" in source
+    assert ".CreateProcessWithTokenW" not in source
+    assert "_INTERACTIVE_DESKTOP = \"winsta0\\\\default\"" in source
+    assert "startup_info.lpDesktop = _INTERACTIVE_DESKTOP" in source
 
 
 def test_windows_host_service_real_attach_integration_env_gated():
