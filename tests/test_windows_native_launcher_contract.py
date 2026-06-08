@@ -4,6 +4,7 @@
 import json
 import os
 import platform
+from pathlib import Path
 
 import pytest
 
@@ -116,6 +117,15 @@ def test_windows_native_launcher_calls_transport_and_returns_exit_code():
     assert exit_code == 0
     assert captured["pipe"] == r"\\.\pipe\skuld-test"
     assert captured["payload"]["sessionId"] == "session-1"
+
+
+def test_windows_native_launcher_uses_win32_named_pipe_client():
+    source = Path("src/skuldbot_runner/windows_native_launcher.py").read_text()
+
+    assert "win32file.CreateFile" in source
+    assert "win32file.WriteFile" in source
+    assert "win32file.ReadFile" in source
+    assert "open(pipe_name" not in source
 
 
 def test_windows_native_launcher_rejects_service_denial():

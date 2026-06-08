@@ -151,17 +151,46 @@ class WindowsNativeLauncher:
     def _named_pipe_transport(pipe_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         request_line = json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
         deadline = time.monotonic() + _PIPE_CONNECT_TIMEOUT_SECONDS
-        last_error: OSError | None = None
+        last_error: OSError | Exception | None = None
         response_line = ""
+        try:
+            import win32con
+            import win32file
+        except ImportError as exc:
+            raise WindowsNativeLauncherError(
+                "pywin32 is required for the Windows native launcher pipe client."
+            ) from exc
+
         while time.monotonic() <= deadline:
+            pipe = None
             try:
-                with open(pipe_name, "r+b", buffering=0) as pipe:
-                    pipe.write(request_line.encode("utf-8"))
-                    response_line = pipe.readline().decode("utf-8", errors="replace")
+                pipe = win32file.CreateFile(
+                    pipe_name,
+                    win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+                    0,
+                    None,
+                    win32con.OPEN_EXISTING,
+                    0,
+                    None,
+                )
+                win32file.WriteFile(pipe, request_line.encode("utf-8"))
+                chunks: list[bytes] = []
+                while True:
+                    _result, data = win32file.ReadFile(pipe, 65536)
+                    chunks.append(bytes(data))
+                    if b"\n" in data:
+                        break
+                response_line = b"".join(chunks).decode("utf-8", errors="replace")
                 break
-            except OSError as exc:
+            except Exception as exc:
                 last_error = exc
                 time.sleep(_PIPE_CONNECT_RETRY_SECONDS)
+            finally:
+                if pipe is not None:
+                    try:
+                        win32file.CloseHandle(pipe)
+                    except Exception:
+                        pass
         else:
             raise WindowsNativeLauncherError(
                 "Windows native launcher service is not reachable."
