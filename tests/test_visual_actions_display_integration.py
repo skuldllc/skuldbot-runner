@@ -189,13 +189,25 @@ error_path = sys.argv[3] if len(sys.argv) > 3 else ""
 try:
     keywords = SkuldBotVisualKeywords()
     screenshot = keywords.desktop_screenshot(artifact_path)
+    from PIL import Image
+
+    template_path = os.path.splitext(artifact_path)[0] + "-template.png"
+    with Image.open(artifact_path) as image:
+        width, height = image.size
+        crop_width = max(40, min(160, width // 4))
+        crop_height = max(40, min(120, height // 4))
+        left = max(0, (width - crop_width) // 2)
+        top = max(0, (height - crop_height) // 2)
+        image.crop((left, top, left + crop_width, top + crop_height)).save(template_path)
+
+    waited = keywords.desktop_wait_image(template_path, timeout_seconds=5)
+    clicked = keywords.desktop_image_click(template_path)
     typed = keywords.desktop_type_text("SkuldBot high density")
     hotkey = keywords.desktop_hotkey("ctrl", "a")
-    waited = keywords.desktop_wait_image(artifact_path, timeout_seconds=3)
-    clicked = keywords.desktop_image_click(artifact_path)
     payload = json.dumps(
         {
             "screenshot": screenshot,
+            "templatePath": template_path,
             "typed": typed,
             "hotkey": hotkey,
             "waited": waited,
@@ -318,9 +330,12 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
                 else tmp_path / run_id
             )
             artifact_path = run_root / "screen.png"
+            template_path = run_root / "screen-template.png"
             result_path = run_root / "result.json"
             error_path = run_root / "error.txt"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            for stale_path in (artifact_path, template_path, result_path, error_path):
+                stale_path.unlink(missing_ok=True)
             artifact_paths.append(artifact_path)
             result_paths.append(result_path)
             error_paths.append(error_path)
