@@ -286,7 +286,6 @@ class PyWin32SessionProcessAdapter:
         advapi32, kernel32, userenv = _load_windows_process_libraries()
         startup_info = _CtypesStartupInfo()
         startup_info.cb = ctypes.sizeof(startup_info)
-        startup_info.lpDesktop = r"winsta0\default"
         process_info = _CtypesProcessInformation()
         mutable_command = ctypes.create_unicode_buffer(command_line)
         environment = _build_worker_environment_block(
