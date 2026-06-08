@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from skuldbot_runner.windows_host_service import (
+    PyWin32NamedPipeHost,
     PyWin32SessionProcessAdapter,
     WindowsHostLaunchRequest,
     WindowsHostService,
@@ -294,6 +295,45 @@ def test_windows_host_service_stop_wakeup_uses_win32_named_pipe_client():
     assert "win32file.CreateFile" in source
     assert "win32file.WriteFile(pipe, b\"{}\\n\")" in source
     assert "open(self.pipe_name" not in source
+
+
+def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
+    class FailingWin32File:
+        written = b""
+
+        @staticmethod
+        def ReadFile(_pipe, _size):
+            raise RuntimeError("unhandled service handler failure")
+
+        @classmethod
+        def WriteFile(cls, _pipe, data):
+            cls.written = data
+
+        @staticmethod
+        def CloseHandle(_pipe):
+            return None
+
+    class CapturingWin32Pipe:
+        disconnected = False
+
+        @classmethod
+        def DisconnectNamedPipe(cls, _pipe):
+            cls.disconnected = True
+
+    PyWin32NamedPipeHost._handle_connected_pipe(
+        pipe=object(),
+        service=WindowsHostService(),
+        win32file=FailingWin32File,
+        win32pipe=CapturingWin32Pipe,
+    )
+
+    response = json.loads(FailingWin32File.written.decode("utf-8"))
+
+    assert response == {
+        "accepted": False,
+        "reason": "Windows host service request failed: RuntimeError",
+    }
+    assert CapturingWin32Pipe.disconnected is True
 
 
 def test_windows_host_service_real_attach_integration_env_gated():

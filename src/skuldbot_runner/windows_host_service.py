@@ -385,8 +385,14 @@ class PyWin32NamedPipeHost:
         win32pipe: Any,
     ) -> None:
         try:
-            _, data = win32file.ReadFile(pipe, 65536)
-            response = response_from_request_bytes(service, data)
+            try:
+                _, data = win32file.ReadFile(pipe, 65536)
+                response = response_from_request_bytes(service, data)
+            except Exception as exc:
+                response = {
+                    "accepted": False,
+                    "reason": f"Windows host service request failed: {type(exc).__name__}",
+                }
             response_line = json.dumps(response, separators=(",", ":")) + "\n"
             win32file.WriteFile(pipe, response_line.encode("utf-8"))
         finally:
