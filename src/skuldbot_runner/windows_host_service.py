@@ -29,6 +29,7 @@ from .windows_native_launcher import _DEFAULT_PIPE_NAME, _WORKER_ENV_ALLOWLIST
 _PROTOCOL_VERSION = 1
 _WINDOWS_INTERACTIVE = "windows_interactive"
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_LOGON_WITH_PROFILE = 0x00000001
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _WORKER_SYSTEM_ENV_ALLOWLIST = {
     "ALLUSERSPROFILE",
@@ -282,20 +283,22 @@ class PyWin32SessionProcessAdapter:
         credentials to the launched worker environment.
         """
 
-        advapi32, kernel32 = _load_windows_process_libraries()
+        advapi32, kernel32, userenv = _load_windows_process_libraries()
         startup_info = _CtypesStartupInfo()
         startup_info.cb = ctypes.sizeof(startup_info)
         startup_info.lpDesktop = r"winsta0\default"
         process_info = _CtypesProcessInformation()
         mutable_command = ctypes.create_unicode_buffer(command_line)
-        environment = _build_worker_environment_block(worker_environment)
-        created = advapi32.CreateProcessAsUserW(
+        environment = _build_worker_environment_block(
+            worker_environment,
+            token_handle=token_handle,
+            userenv=userenv,
+        )
+        created = advapi32.CreateProcessWithTokenW(
             token_handle,
+            _LOGON_WITH_PROFILE,
             None,
             mutable_command,
-            None,
-            None,
-            False,
             _CREATE_UNICODE_ENVIRONMENT,
             environment,
             None,
@@ -309,7 +312,7 @@ class PyWin32SessionProcessAdapter:
 
     @staticmethod
     def _get_process_exit_code(process_handle: int) -> int:
-        _advapi32, kernel32 = _load_windows_process_libraries()
+        _advapi32, kernel32, _userenv = _load_windows_process_libraries()
         exit_code = ctypes.wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -409,23 +412,22 @@ def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dic
     return service.handle_payload(payload)
 
 
-def _load_windows_process_libraries() -> tuple[Any, Any]:
+def _load_windows_process_libraries() -> tuple[Any, Any, Any]:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    advapi32.CreateProcessAsUserW.argtypes = [
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+    advapi32.CreateProcessWithTokenW.argtypes = [
         wintypes.HANDLE,
+        wintypes.DWORD,
         wintypes.LPCWSTR,
         wintypes.LPWSTR,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        wintypes.BOOL,
         wintypes.DWORD,
         ctypes.c_void_p,
         wintypes.LPCWSTR,
         ctypes.POINTER(_CtypesStartupInfo),
         ctypes.POINTER(_CtypesProcessInformation),
     ]
-    advapi32.CreateProcessAsUserW.restype = wintypes.BOOL
+    advapi32.CreateProcessWithTokenW.restype = wintypes.BOOL
     kernel32.GetExitCodeProcess.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.DWORD),
@@ -433,7 +435,15 @@ def _load_windows_process_libraries() -> tuple[Any, Any]:
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
-    return advapi32, kernel32
+    userenv.CreateEnvironmentBlock.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        wintypes.HANDLE,
+        wintypes.BOOL,
+    ]
+    userenv.CreateEnvironmentBlock.restype = wintypes.BOOL
+    userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+    userenv.DestroyEnvironmentBlock.restype = wintypes.BOOL
+    return advapi32, kernel32, userenv
 
 
 def _read_worker_environment(value: Any) -> dict[str, str] | None:
@@ -454,18 +464,64 @@ def _read_worker_environment(value: Any) -> dict[str, str] | None:
     return cleaned
 
 
-def _build_worker_environment_block(worker_environment: Mapping[str, str]) -> Any:
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key.upper() in _WORKER_SYSTEM_ENV_ALLOWLIST
-    }
+def _build_worker_environment_block(
+    worker_environment: Mapping[str, str],
+    *,
+    token_handle: int | None = None,
+    userenv: Any | None = None,
+) -> Any:
+    environment = _read_user_environment(token_handle=token_handle, userenv=userenv)
+    if not environment:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key.upper() in _WORKER_SYSTEM_ENV_ALLOWLIST
+        }
     environment.update(worker_environment)
     environment[_ATTACHED_SESSION_ENV] = "1"
     environment_block = "".join(
         f"{key}={value}\0" for key, value in sorted(environment.items())
     )
     return ctypes.create_unicode_buffer(environment_block + "\0")
+
+
+def _read_user_environment(
+    *,
+    token_handle: int | None,
+    userenv: Any | None,
+) -> dict[str, str]:
+    if token_handle is None or userenv is None:
+        return {}
+
+    environment_pointer = ctypes.c_void_p()
+    created = userenv.CreateEnvironmentBlock(
+        ctypes.byref(environment_pointer),
+        token_handle,
+        False,
+    )
+    if not created or not environment_pointer.value:
+        return {}
+
+    try:
+        return _environment_block_to_dict(environment_pointer.value)
+    finally:
+        userenv.DestroyEnvironmentBlock(environment_pointer)
+
+
+def _environment_block_to_dict(address: int) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    cursor = address
+    wchar_size = ctypes.sizeof(ctypes.c_wchar)
+    while True:
+        item = ctypes.wstring_at(cursor)
+        if not item:
+            break
+        if "=" in item:
+            key, value = item.split("=", 1)
+            if key:
+                environment[key] = value
+        cursor += (len(item) + 1) * wchar_size
+    return environment
 
 
 def parse_launch_payload(payload: Mapping[str, Any]) -> WindowsHostLaunchRequest:
