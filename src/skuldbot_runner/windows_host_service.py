@@ -429,11 +429,20 @@ class PyWin32NamedPipeHost:
                     pass
 
 
-def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dict[str, Any]:
+def response_from_request_bytes(service: WindowsHostService, data: Any) -> dict[str, Any]:
     """Parse one named-pipe request and return a strict response."""
 
     try:
-        payload = json.loads(data.decode("utf-8"))
+        if isinstance(data, str):
+            request_text = data
+        elif isinstance(data, bytes | bytearray | memoryview):
+            request_text = bytes(data).decode("utf-8")
+        else:
+            return {
+                "accepted": False,
+                "reason": "Windows host service request frame was unsupported.",
+            }
+        payload = json.loads(request_text)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"accepted": False, "reason": "Windows host service request was invalid JSON."}
     return service.handle_payload(payload)

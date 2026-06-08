@@ -220,6 +220,46 @@ def test_windows_host_service_pipe_request_rejects_invalid_json():
     assert "invalid JSON" in response["reason"]
 
 
+def test_windows_host_service_pipe_request_accepts_supported_frame_types():
+    service = WindowsHostService(
+        adapter=_CapturingAdapter(),
+        secret_resolver=_secret_resolver,
+        platform_system="Windows",
+    )
+    request_text = json.dumps(_payload())
+
+    assert response_from_request_bytes(service, request_text.encode("utf-8")) == {
+        "accepted": True,
+        "exitCode": 0,
+    }
+    assert response_from_request_bytes(service, request_text) == {
+        "accepted": True,
+        "exitCode": 0,
+    }
+    assert response_from_request_bytes(
+        service,
+        memoryview(request_text.encode("utf-8")),
+    ) == {
+        "accepted": True,
+        "exitCode": 0,
+    }
+
+
+def test_windows_host_service_pipe_request_rejects_unsupported_frame_type():
+    service = WindowsHostService(
+        adapter=_CapturingAdapter(),
+        secret_resolver=_secret_resolver,
+        platform_system="Windows",
+    )
+
+    response = response_from_request_bytes(service, object())
+
+    assert response == {
+        "accepted": False,
+        "reason": "Windows host service request frame was unsupported.",
+    }
+
+
 def test_windows_host_service_rejects_non_windows_host():
     service = WindowsHostService(
         adapter=_CapturingAdapter(),
