@@ -328,7 +328,11 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
         results = []
         for process in processes:
             stdout, stderr = process.communicate(timeout=45)
-            assert process.returncode == 0, stderr
+            assert process.returncode == 0, (
+                f"visual worker failed with exit={process.returncode}\n"
+                f"stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            )
             results.append(json.loads(stdout))
 
     assert leases[0].slot.session_id != leases[1].slot.session_id
