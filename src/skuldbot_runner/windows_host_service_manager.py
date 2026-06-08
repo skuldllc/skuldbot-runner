@@ -150,15 +150,17 @@ def _run_pywin32_service_command(config: WindowsHostServiceManagerConfig) -> int
     the contract without pywin32 installed.
     """
 
-    command_argv = [
-        sys.argv[0],
-        config.action,
-        "--startup",
-        "auto",
-        "--description",
-        _SERVICE_DESCRIPTION,
-        *build_service_module_arguments(config),
-    ]
+    command_argv = [sys.argv[0]]
+    if config.action in {"install", "update"}:
+        command_argv.extend(
+            [
+                "--startup",
+                "auto",
+                "--description",
+                _SERVICE_DESCRIPTION,
+            ]
+        )
+    command_argv.extend([*build_service_module_arguments(config), config.action])
     original_argv = sys.argv
     try:
         sys.argv = command_argv
