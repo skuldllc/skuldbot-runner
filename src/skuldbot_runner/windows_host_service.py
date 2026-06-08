@@ -29,7 +29,6 @@ from .windows_native_launcher import _DEFAULT_PIPE_NAME, _WORKER_ENV_ALLOWLIST
 _PROTOCOL_VERSION = 1
 _WINDOWS_INTERACTIVE = "windows_interactive"
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
-_LOGON_WITH_PROFILE = 0x00000001
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _WORKER_SYSTEM_ENV_ALLOWLIST = {
     "ALLUSERSPROFILE",
@@ -271,7 +270,7 @@ class PyWin32SessionProcessAdapter:
     ) -> int:
         """Launch one command in the assigned session using advapi32.
 
-        pywin32 does not expose CreateProcessWithTokenW. The host service uses
+        pywin32 does not expose the flags Skuld needs consistently. The host service uses
         the session token returned by WTSQueryUserToken and never passes robot
         credentials to the launched worker environment.
         """
@@ -283,9 +282,8 @@ class PyWin32SessionProcessAdapter:
         process_info = _CtypesProcessInformation()
         mutable_command = ctypes.create_unicode_buffer(command_line)
         environment = _build_worker_environment_block(worker_environment)
-        created = advapi32.CreateProcessWithTokenW(
+        created = advapi32.CreateProcessAsUserW(
             token_handle,
-            _LOGON_WITH_PROFILE,
             None,
             mutable_command,
             _CREATE_UNICODE_ENVIRONMENT,
@@ -404,9 +402,8 @@ def response_from_request_bytes(service: WindowsHostService, data: bytes) -> dic
 def _load_windows_process_libraries() -> tuple[Any, Any]:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    advapi32.CreateProcessWithTokenW.argtypes = [
+    advapi32.CreateProcessAsUserW.argtypes = [
         wintypes.HANDLE,
-        wintypes.DWORD,
         wintypes.LPCWSTR,
         wintypes.LPWSTR,
         wintypes.DWORD,
@@ -415,7 +412,7 @@ def _load_windows_process_libraries() -> tuple[Any, Any]:
         ctypes.POINTER(_CtypesStartupInfo),
         ctypes.POINTER(_CtypesProcessInformation),
     ]
-    advapi32.CreateProcessWithTokenW.restype = wintypes.BOOL
+    advapi32.CreateProcessAsUserW.restype = wintypes.BOOL
     kernel32.GetExitCodeProcess.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(wintypes.DWORD),
