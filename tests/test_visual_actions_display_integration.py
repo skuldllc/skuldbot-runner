@@ -178,6 +178,7 @@ VISUAL_RUNNER_SCRIPT = r"""
 import json
 import os
 import sys
+import time
 import traceback
 
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
@@ -187,27 +188,41 @@ result_path = sys.argv[2] if len(sys.argv) > 2 else ""
 error_path = sys.argv[3] if len(sys.argv) > 3 else ""
 
 try:
+    from PIL import Image, ImageDraw
+    import tkinter as tk
+
+    target_path = os.path.splitext(artifact_path)[0] + "-target.png"
+    image = Image.new("RGB", (140, 90), "#1f6feb")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((8, 8, 132, 82), outline="#f2cc60", width=5)
+    draw.line((16, 70, 124, 20), fill="#ffffff", width=6)
+    draw.ellipse((54, 24, 86, 56), fill="#2da44e", outline="#ffffff", width=4)
+    image.save(target_path)
+
+    root = tk.Tk()
+    root.title("SkuldBot visual target")
+    root.geometry("140x90+120+120")
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+    photo = tk.PhotoImage(file=target_path)
+    label = tk.Label(root, image=photo, borderwidth=0, highlightthickness=0)
+    label.pack()
+    root.update()
+    time.sleep(0.5)
+
     keywords = SkuldBotVisualKeywords()
     screenshot = keywords.desktop_screenshot(artifact_path)
-    from PIL import Image
 
-    template_path = os.path.splitext(artifact_path)[0] + "-template.png"
-    with Image.open(artifact_path) as image:
-        width, height = image.size
-        crop_width = max(40, min(160, width // 4))
-        crop_height = max(40, min(120, height // 4))
-        left = max(0, (width - crop_width) // 2)
-        top = max(0, (height - crop_height) // 2)
-        image.crop((left, top, left + crop_width, top + crop_height)).save(template_path)
-
-    waited = keywords.desktop_wait_image(template_path, timeout_seconds=5)
-    clicked = keywords.desktop_image_click(template_path)
+    root.update()
+    waited = keywords.desktop_wait_image(target_path, timeout_seconds=5)
+    root.update()
+    clicked = keywords.desktop_image_click(target_path)
     typed = keywords.desktop_type_text("SkuldBot high density")
     hotkey = keywords.desktop_hotkey("ctrl", "a")
     payload = json.dumps(
         {
             "screenshot": screenshot,
-            "templatePath": template_path,
+            "targetPath": target_path,
             "typed": typed,
             "hotkey": hotkey,
             "waited": waited,
@@ -334,7 +349,15 @@ def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(t
             result_path = run_root / "result.json"
             error_path = run_root / "error.txt"
             artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            for stale_path in (artifact_path, template_path, result_path, error_path):
+            target_path = run_root / "screen-target.png"
+            template_path = run_root / "screen-template.png"
+            for stale_path in (
+                artifact_path,
+                target_path,
+                template_path,
+                result_path,
+                error_path,
+            ):
                 stale_path.unlink(missing_ok=True)
             artifact_paths.append(artifact_path)
             result_paths.append(result_path)
