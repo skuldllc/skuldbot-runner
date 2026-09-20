@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,12 @@ from .models import (
     VisualActionKind,
 )
 from .ocr_provider import OcrProviderConfig, OcrProviderError, ProviderBackedOcrClient
+from .staging_artifacts import (
+    STAGING_ROOT_ENV,
+    is_path_inside_root,
+    record_uploaded_staging_artifact,
+    require_evidence_staging_path,
+)
 from .visual_adapter import RpaDesktopVisualAdapter, VisualAdapterError
 
 DISPLAY_READY_STATES = {
@@ -148,6 +155,7 @@ class SkuldBotVisualKeywords:
             artifact_path=Path(artifact.path),
             checksum_sha256=artifact.checksum_sha256,
             mime_type="image/png",
+            cleanup_staging=True,
         )
         return VisualActionResult(
             action=VisualActionKind.SCREENSHOT,
@@ -202,6 +210,7 @@ class SkuldBotVisualKeywords:
             self._lease_context,
         )
         resolved_path = self._require_existing_file(image_path)
+        self._require_reference_outside_staging(resolved_path)
         self._execute_adapter(lambda adapter: adapter.image_click(resolved_path))
         return VisualActionResult(
             action=VisualActionKind.IMAGE_CLICK,
@@ -222,6 +231,7 @@ class SkuldBotVisualKeywords:
             self._lease_context,
         )
         resolved_path = self._require_existing_file(image_path)
+        self._require_reference_outside_staging(resolved_path)
         self._execute_adapter(
             lambda adapter: adapter.wait_image(
                 resolved_path,
@@ -295,6 +305,16 @@ class SkuldBotVisualKeywords:
             raise VisualActionError(f"File not found: {path}")
         return resolved_path
 
+    @staticmethod
+    def _require_reference_outside_staging(path: Path) -> None:
+        staging_root = os.environ.get(STAGING_ROOT_ENV, "").strip()
+        if not staging_root:
+            return
+        if is_path_inside_root(path, Path(staging_root).expanduser()):
+            raise VisualActionError(
+                "Visual reference images must be outside the evidence staging folder."
+            )
+
     def _upload_artifact(
         self,
         *,
@@ -303,6 +323,7 @@ class SkuldBotVisualKeywords:
         checksum_sha256: str,
         mime_type: str,
         redaction_applied: bool | None = None,
+        cleanup_staging: bool = False,
     ) -> Any | None:
         if not artifact_upload_required():
             return None
@@ -310,8 +331,14 @@ class SkuldBotVisualKeywords:
         if self._lease_context is None:
             raise VisualActionError("Display lease is required for evidence upload.")
 
+        if cleanup_staging:
+            try:
+                require_evidence_staging_path(artifact_path)
+            except ValueError as exc:
+                raise VisualActionError(str(exc)) from exc
+
         try:
-            return OrchestratorArtifactUploader().upload(
+            uploaded = OrchestratorArtifactUploader().upload(
                 run_id=self._lease_context.run_id,
                 action=action.value,
                 artifact_path=artifact_path,
@@ -319,5 +346,12 @@ class SkuldBotVisualKeywords:
                 mime_type=mime_type,
                 redaction_applied=redaction_applied,
             )
+            if cleanup_staging:
+                record_uploaded_staging_artifact(
+                    artifact_path=artifact_path,
+                    artifact_id=uploaded.artifact_id,
+                    action=action.value,
+                )
+            return uploaded
         except ArtifactUploadError as exc:
             raise VisualActionError(str(exc)) from exc
