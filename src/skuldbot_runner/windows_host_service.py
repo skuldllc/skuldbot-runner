@@ -61,6 +61,49 @@ class WindowsHostServiceError(RuntimeError):
     """Raised when a host-service request cannot be handled safely."""
 
 
+class WindowsHostUnauthorizedClientError(WindowsHostServiceError):
+    """Raised when a named-pipe client fails the local identity boundary."""
+
+
+class WindowsHostEventLogger(Protocol):
+    """Records Windows host-service security and operational events."""
+
+    def warning(self, message: str) -> None:
+        """Record a warning-level service event."""
+
+    def error(self, message: str) -> None:
+        """Record an error-level service event."""
+
+
+class _NoopWindowsHostEventLogger:
+    def warning(self, message: str) -> None:
+        return None
+
+    def error(self, message: str) -> None:
+        return None
+
+
+class _ServiceManagerEventLogger:
+    def warning(self, message: str) -> None:
+        try:
+            import servicemanager
+
+            if hasattr(servicemanager, "LogWarningMsg"):
+                servicemanager.LogWarningMsg(message)
+            else:
+                servicemanager.LogInfoMsg(f"WARNING: {message}")
+        except Exception:
+            return
+
+    def error(self, message: str) -> None:
+        try:
+            import servicemanager
+
+            servicemanager.LogErrorMsg(message)
+        except Exception:
+            return
+
+
 class _CtypesStartupInfo(ctypes.Structure):
     _fields_ = [
         ("cb", wintypes.DWORD),
@@ -126,6 +169,9 @@ class WindowsProcessAdapter(Protocol):
     ) -> int:
         """Return the worker process exit code."""
 
+    def shutdown_active_processes(self) -> int:
+        """Terminate active worker processes during managed service shutdown."""
+
 
 SecretResolver = Callable[[str], str | None]
 
@@ -165,6 +211,14 @@ class WindowsHostService:
         except WindowsHostServiceError as exc:
             return {"accepted": False, "reason": str(exc)}
 
+    def shutdown(self) -> int:
+        """Terminate active worker processes owned by this service instance."""
+
+        shutdown = getattr(self.adapter, "shutdown_active_processes", None)
+        if shutdown is None:
+            return 0
+        return int(shutdown())
+
 
 class PyWin32SessionProcessAdapter:
     """Windows adapter using pywin32 WTSQueryUserToken/CreateProcessAsUser."""
@@ -172,6 +226,8 @@ class PyWin32SessionProcessAdapter:
     def __init__(self, *, platform_system: str | None = None, timeout_seconds: int = 3600) -> None:
         self.platform_system = (platform_system or platform.system()).lower()
         self.timeout_seconds = timeout_seconds
+        self._active_process_handles: set[int] = set()
+        self._active_process_lock = threading.Lock()
 
     def launch(
         self,
@@ -204,16 +260,25 @@ class PyWin32SessionProcessAdapter:
                 command_line,
                 request.worker_environment or {},
             )
-            wait_result = win32event.WaitForSingleObject(
-                process_handle,
-                self.timeout_seconds * 1000,
-            )
-            if wait_result == win32con.WAIT_TIMEOUT:
-                raise WindowsHostServiceError("Windows worker process timed out.")
-            exit_code = self._get_process_exit_code(process_handle)
-            if type(exit_code) is not int:
-                raise WindowsHostServiceError("Windows worker exit code was invalid.")
-            return exit_code
+            self._track_process_handle(process_handle)
+            process_handle_closed = False
+            try:
+                wait_result = win32event.WaitForSingleObject(
+                    process_handle,
+                    self.timeout_seconds * 1000,
+                )
+                if wait_result == win32con.WAIT_TIMEOUT:
+                    self._terminate_process_handle(process_handle)
+                    raise WindowsHostServiceError("Windows worker process timed out.")
+                exit_code = self._get_process_exit_code(process_handle)
+                process_handle_closed = True
+                if type(exit_code) is not int:
+                    raise WindowsHostServiceError("Windows worker exit code was invalid.")
+                return exit_code
+            finally:
+                self._untrack_process_handle(process_handle)
+                if not process_handle_closed:
+                    self._close_process_handle(process_handle)
         except WindowsHostServiceError:
             raise
         except Exception as exc:
@@ -331,12 +396,53 @@ class PyWin32SessionProcessAdapter:
         kernel32.CloseHandle(process_handle)
         return int(exit_code.value)
 
+    def shutdown_active_processes(self) -> int:
+        """Terminate active worker processes when the managed service stops/removes."""
+
+        with self._active_process_lock:
+            handles = tuple(self._active_process_handles)
+        for process_handle in handles:
+            self._terminate_process_handle(process_handle)
+        return len(handles)
+
+    def _track_process_handle(self, process_handle: int) -> None:
+        with self._active_process_lock:
+            self._active_process_handles.add(process_handle)
+
+    def _untrack_process_handle(self, process_handle: int) -> None:
+        with self._active_process_lock:
+            self._active_process_handles.discard(process_handle)
+
+    @staticmethod
+    def _terminate_process_handle(process_handle: int) -> None:
+        _advapi32, kernel32, _userenv = _load_windows_process_libraries()
+        try:
+            kernel32.TerminateProcess(process_handle, 1)
+        except Exception:
+            return
+
+    @staticmethod
+    def _close_process_handle(process_handle: int) -> None:
+        _advapi32, kernel32, _userenv = _load_windows_process_libraries()
+        try:
+            kernel32.CloseHandle(process_handle)
+        except Exception:
+            return
+
 
 class PyWin32NamedPipeHost:
     """Named-pipe host for the privileged Windows service."""
 
-    def __init__(self, pipe_name: str = _DEFAULT_PIPE_NAME) -> None:
+    def __init__(
+        self,
+        pipe_name: str = _DEFAULT_PIPE_NAME,
+        *,
+        event_logger: WindowsHostEventLogger | None = None,
+        worker_join_timeout_seconds: float = 5.0,
+    ) -> None:
         self.pipe_name = pipe_name
+        self.event_logger = event_logger or _ServiceManagerEventLogger()
+        self.worker_join_timeout_seconds = worker_join_timeout_seconds
 
     def serve_forever(
         self,
@@ -365,45 +471,60 @@ class PyWin32NamedPipeHost:
             win32security,
         )
         workers: list[threading.Thread] = []
-        while not (stop_requested and stop_requested()):
-            pipe = win32pipe.CreateNamedPipe(
-                self.pipe_name,
-                win32pipe.PIPE_ACCESS_DUPLEX,
-                win32pipe.PIPE_TYPE_MESSAGE
-                | win32pipe.PIPE_READMODE_MESSAGE
-                | win32pipe.PIPE_WAIT,
-                win32pipe.PIPE_UNLIMITED_INSTANCES,
-                65536,
-                65536,
-                0,
-                pipe_security,
-            )
-            try:
-                win32pipe.ConnectNamedPipe(pipe, None)
-                if stop_requested and stop_requested():
-                    win32pipe.DisconnectNamedPipe(pipe)
-                    win32file.CloseHandle(pipe)
-                    continue
-                worker = threading.Thread(
-                    target=self._handle_connected_pipe,
-                    args=(
-                        pipe,
-                        service,
-                        win32file,
-                        win32pipe,
-                        win32security,
-                        win32api,
-                        win32con,
-                        allowed_client_sid,
-                    ),
-                    daemon=True,
+        try:
+            while not (stop_requested and stop_requested()):
+                pipe = win32pipe.CreateNamedPipe(
+                    self.pipe_name,
+                    win32pipe.PIPE_ACCESS_DUPLEX,
+                    win32pipe.PIPE_TYPE_MESSAGE
+                    | win32pipe.PIPE_READMODE_MESSAGE
+                    | win32pipe.PIPE_WAIT,
+                    win32pipe.PIPE_UNLIMITED_INSTANCES,
+                    65536,
+                    65536,
+                    0,
+                    pipe_security,
                 )
-                worker.start()
-                workers.append(worker)
-                workers = [item for item in workers if item.is_alive()]
-            except Exception:
-                win32file.CloseHandle(pipe)
-                raise
+                try:
+                    win32pipe.ConnectNamedPipe(pipe, None)
+                    if stop_requested and stop_requested():
+                        win32pipe.DisconnectNamedPipe(pipe)
+                        win32file.CloseHandle(pipe)
+                        continue
+                    worker = threading.Thread(
+                        target=self._handle_connected_pipe,
+                        args=(
+                            pipe,
+                            service,
+                            win32file,
+                            win32pipe,
+                            win32security,
+                            win32api,
+                            win32con,
+                            allowed_client_sid,
+                            self.event_logger,
+                        ),
+                        daemon=True,
+                    )
+                    worker.start()
+                    workers.append(worker)
+                    workers = [item for item in workers if item.is_alive()]
+                except Exception as exc:
+                    self.event_logger.error(
+                        "Unhandled Windows host service pipe accept exception: "
+                        f"{type(exc).__name__}"
+                    )
+                    win32file.CloseHandle(pipe)
+                    raise
+        finally:
+            terminated = service.shutdown()
+            if terminated:
+                self.event_logger.warning(
+                    "Terminated "
+                    f"{terminated} active Windows worker process(es) during service shutdown."
+                )
+            for worker in workers:
+                worker.join(timeout=self.worker_join_timeout_seconds)
 
     @staticmethod
     def _handle_connected_pipe(
@@ -415,7 +536,9 @@ class PyWin32NamedPipeHost:
         win32api: Any | None = None,
         win32con: Any | None = None,
         allowed_client_sid: str | None = None,
+        event_logger: WindowsHostEventLogger | None = None,
     ) -> None:
+        event_logger = event_logger or _NoopWindowsHostEventLogger()
         try:
             try:
                 _verify_connected_pipe_client(
@@ -429,6 +552,7 @@ class PyWin32NamedPipeHost:
                 _, data = win32file.ReadFile(pipe, 65536)
                 response = response_from_request_bytes(service, data)
             except Exception as exc:
+                _log_pipe_exception(event_logger, exc)
                 response = {
                     "accepted": False,
                     "reason": _unhandled_pipe_error_reason(exc),
@@ -485,7 +609,16 @@ def response_from_request_bytes(service: WindowsHostService, data: Any) -> dict[
         payload = json.loads(request_text)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {"accepted": False, "reason": "Windows host service request was invalid JSON."}
+    if payload == {"protocolVersion": _PROTOCOL_VERSION, "action": "health"}:
+        return {"accepted": True, "status": "healthy"}
     return service.handle_payload(payload)
+
+
+def _log_pipe_exception(event_logger: WindowsHostEventLogger, exc: Exception) -> None:
+    if isinstance(exc, WindowsHostUnauthorizedClientError):
+        event_logger.warning("Rejected unauthorized Windows host service pipe client.")
+        return
+    event_logger.error(f"Unhandled Windows host service pipe exception: {type(exc).__name__}")
 
 
 def _unhandled_pipe_error_reason(exc: Exception) -> str:
@@ -572,7 +705,9 @@ def _verify_connected_pipe_client(
             allowed_client_sid,
             win32security,
         ):
-            raise WindowsHostServiceError("Windows host service pipe client is not authorized.")
+            raise WindowsHostUnauthorizedClientError(
+                "Windows host service pipe client is not authorized."
+            )
     finally:
         win32security.RevertToSelf()
 
