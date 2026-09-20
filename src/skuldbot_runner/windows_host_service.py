@@ -33,8 +33,10 @@ _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _INTERACTIVE_DESKTOP = "winsta0\\default"
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _DIAGNOSTIC_REASONS_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_DIAGNOSTIC_REASONS"
+_ALLOWED_CLIENT_SID_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID"
 _LOCAL_SYSTEM_SID = "S-1-5-18"
 _BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+_WINDOWS_SID_PATTERN = re.compile(r"^S-\d+(?:-\d+){1,15}$")
 _SENSITIVE_MESSAGE_PATTERN = re.compile(
     r"(?i)(password|passwd|secret|token|credential|key)(\s*[=:]\s*)([^,;\s\"']+)"
 )
@@ -356,7 +358,9 @@ class PyWin32NamedPipeHost:
                 "pywin32 is required for the Windows named-pipe host."
             ) from exc
 
+        allowed_client_sid = _read_allowed_client_sid(os.environ)
         pipe_security = _build_pipe_security_attributes(
+            allowed_client_sid,
             pywintypes,
             win32security,
         )
@@ -390,6 +394,7 @@ class PyWin32NamedPipeHost:
                         win32security,
                         win32api,
                         win32con,
+                        allowed_client_sid,
                     ),
                     daemon=True,
                 )
@@ -409,11 +414,13 @@ class PyWin32NamedPipeHost:
         win32security: Any | None = None,
         win32api: Any | None = None,
         win32con: Any | None = None,
+        allowed_client_sid: str | None = None,
     ) -> None:
         try:
             try:
                 _verify_connected_pipe_client(
                     pipe=pipe,
+                    allowed_client_sid=allowed_client_sid,
                     win32pipe=win32pipe,
                     win32security=win32security,
                     win32api=win32api,
@@ -497,16 +504,32 @@ def _unhandled_pipe_error_reason(exc: Exception) -> str:
     return f"{reason}: {detail}"
 
 
-def _build_pipe_security_descriptor_sddl() -> str:
-    """Build a fail-closed pipe DACL for LocalSystem and local administrators."""
+def _read_allowed_client_sid(environment: Mapping[str, str]) -> str:
+    """Read the explicit non-admin launcher SID allowed to connect to the pipe."""
+
+    allowed_client_sid = environment.get(_ALLOWED_CLIENT_SID_ENV, "").strip()
+    if not allowed_client_sid:
+        raise WindowsHostServiceError(
+            f"{_ALLOWED_CLIENT_SID_ENV} is required for the Windows host service pipe."
+        )
+    if not _WINDOWS_SID_PATTERN.match(allowed_client_sid):
+        raise WindowsHostServiceError(
+            f"{_ALLOWED_CLIENT_SID_ENV} must be a Windows SID string."
+        )
+    return allowed_client_sid
+
+
+def _build_pipe_security_descriptor_sddl(allowed_client_sid: str) -> str:
+    """Build a fail-closed pipe DACL for SYSTEM, admins, and one runner SID."""
 
     # D:P = protected DACL, no inherited default permissions. SY and BA keep
-    # operational/service control access. No operator-provided runtime SID is
-    # accepted here: the pipe boundary is intentionally fixed in code.
-    return "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+    # operational/service control access; the explicit SID is the one
+    # non-admin runner identity allowed through the pipe boundary.
+    return f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{allowed_client_sid})"
 
 
 def _build_pipe_security_attributes(
+    allowed_client_sid: str,
     pywintypes: Any,
     win32security: Any,
 ) -> Any:
@@ -514,7 +537,7 @@ def _build_pipe_security_attributes(
 
     security_attributes = pywintypes.SECURITY_ATTRIBUTES()
     security_descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-        _build_pipe_security_descriptor_sddl(),
+        _build_pipe_security_descriptor_sddl(allowed_client_sid),
         win32security.SDDL_REVISION_1,
     )
     security_attributes.SECURITY_DESCRIPTOR = security_descriptor
@@ -524,6 +547,7 @@ def _build_pipe_security_attributes(
 def _verify_connected_pipe_client(
     *,
     pipe: Any,
+    allowed_client_sid: str | None,
     win32pipe: Any,
     win32security: Any | None,
     win32api: Any | None,
@@ -533,6 +557,8 @@ def _verify_connected_pipe_client(
 
     if win32security is None or win32api is None or win32con is None:
         raise WindowsHostServiceError("Windows pipe client identity verification unavailable.")
+    if allowed_client_sid is None:
+        raise WindowsHostServiceError("Windows pipe allowed client SID is unavailable.")
 
     win32pipe.ImpersonateNamedPipeClient(pipe)
     try:
@@ -541,17 +567,30 @@ def _verify_connected_pipe_client(
             win32con.TOKEN_QUERY,
             True,
         )
-        if not _token_is_local_system_or_admin(thread_token, win32security):
+        if not _token_is_allowed_pipe_client(
+            thread_token,
+            allowed_client_sid,
+            win32security,
+        ):
             raise WindowsHostServiceError("Windows host service pipe client is not authorized.")
     finally:
         win32security.RevertToSelf()
 
 
-def _token_is_local_system_or_admin(token: Any, win32security: Any) -> bool:
-    """Return true when TokenUser is SYSTEM or TokenGroups includes local Administrators."""
+def _token_is_allowed_pipe_client(
+    token: Any,
+    allowed_client_sid: str,
+    win32security: Any,
+) -> bool:
+    """Return true for SYSTEM, local Administrators, or the configured runner SID."""
 
     token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
-    if _sid_to_string(token_user[0], win32security).lower() == _LOCAL_SYSTEM_SID.lower():
+    allowed_sids = {
+        _LOCAL_SYSTEM_SID.lower(),
+        _BUILTIN_ADMINISTRATORS_SID.lower(),
+        allowed_client_sid.lower(),
+    }
+    if _sid_to_string(token_user[0], win32security).lower() in allowed_sids:
         return True
 
     try:
@@ -560,7 +599,7 @@ def _token_is_local_system_or_admin(token: Any, win32security: Any) -> bool:
         groups = []
     for group in groups:
         sid = group[0] if isinstance(group, tuple) else group
-        if _sid_to_string(sid, win32security).lower() == _BUILTIN_ADMINISTRATORS_SID.lower():
+        if _sid_to_string(sid, win32security).lower() in allowed_sids:
             return True
     return False
 

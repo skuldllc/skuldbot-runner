@@ -16,7 +16,8 @@ from skuldbot_runner.windows_host_service import (
     WindowsHostServiceError,
     WindowsRobotCredential,
     _build_pipe_security_descriptor_sddl,
-    _token_is_local_system_or_admin,
+    _read_allowed_client_sid,
+    _token_is_allowed_pipe_client,
     parse_launch_payload,
     resolve_robot_credential,
     resolve_secret_value,
@@ -384,14 +385,29 @@ def test_windows_host_service_stop_wakeup_uses_win32_named_pipe_client():
     assert "open(self.pipe_name" not in source
 
 
-def test_windows_host_service_pipe_dacl_is_fixed_to_system_and_administrators():
-    sddl = _build_pipe_security_descriptor_sddl()
+def test_windows_host_service_pipe_requires_explicit_allowed_client_sid():
+    assert _read_allowed_client_sid(
+        {"SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID": " S-1-5-21-1-2-3-1001 "}
+    ) == "S-1-5-21-1-2-3-1001"
 
-    assert sddl == "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+    for environment in (
+        {},
+        {"SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID": ""},
+        {"SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID": "BUILTIN\\Users"},
+        {"SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID": "S-1"},
+    ):
+        with pytest.raises(WindowsHostServiceError):
+            _read_allowed_client_sid(environment)
+
+
+def test_windows_host_service_pipe_dacl_includes_system_admins_and_runner_sid_only():
+    sddl = _build_pipe_security_descriptor_sddl("S-1-5-21-1-2-3-1001")
+
+    assert sddl == "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-21-1-2-3-1001)"
     assert "WD" not in sddl
     assert "AU" not in sddl
     assert "AN" not in sddl
-    assert "SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID" not in Path(
+    assert "SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID" in Path(
         "src/skuldbot_runner/windows_host_service.py"
     ).read_text()
 
@@ -411,7 +427,7 @@ def test_windows_host_service_pipe_security_and_client_identity_are_enforced():
     assert "RevertToSelf" in source
 
 
-def test_windows_host_service_pipe_identity_check_allows_system_or_admins_only():
+def test_windows_host_service_pipe_identity_check_allows_system_admins_or_runner_sid():
     class FakeWin32Security:
         TokenUser = object()
         TokenGroups = object()
@@ -431,14 +447,25 @@ def test_windows_host_service_pipe_identity_check_allows_system_or_admins_only()
                 return [(sid, 0) for sid in cls.group_sids]
             raise AssertionError(f"unexpected token info class: {info_class!r}")
 
-    assert not _token_is_local_system_or_admin("token", FakeWin32Security)
+    assert not _token_is_allowed_pipe_client(
+        "token",
+        "S-1-5-21-runner",
+        FakeWin32Security,
+    )
 
     FakeWin32Security.user_sid = "S-1-5-18"
-    assert _token_is_local_system_or_admin("token", FakeWin32Security)
+    assert _token_is_allowed_pipe_client("token", "S-1-5-21-runner", FakeWin32Security)
 
     FakeWin32Security.user_sid = "S-1-5-21-user"
     FakeWin32Security.group_sids = ["S-1-5-32-544"]
-    assert _token_is_local_system_or_admin("token", FakeWin32Security)
+    assert _token_is_allowed_pipe_client("token", "S-1-5-21-runner", FakeWin32Security)
+
+    FakeWin32Security.group_sids = ["S-1-5-21-runner"]
+    assert _token_is_allowed_pipe_client("token", "S-1-5-21-runner", FakeWin32Security)
+
+    FakeWin32Security.user_sid = "S-1-5-21-runner"
+    FakeWin32Security.group_sids = ["S-1-5-21-group"]
+    assert _token_is_allowed_pipe_client("token", "S-1-5-21-runner", FakeWin32Security)
 
 
 def test_windows_host_service_pipe_denies_unauthorized_client_before_reading_payload():
@@ -515,6 +542,7 @@ def test_windows_host_service_pipe_denies_unauthorized_client_before_reading_pay
         win32security=RejectingWin32Security,
         win32api=FakeWin32Api,
         win32con=FakeWin32Con,
+        allowed_client_sid="S-1-5-21-allowed",
     )
 
     response = json.loads(CapturingWin32File.written.decode("utf-8"))
@@ -564,6 +592,7 @@ def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
         win32security=_AuthorizedWin32Security,
         win32api=_AuthorizedWin32Api,
         win32con=_AuthorizedWin32Con,
+        allowed_client_sid="S-1-5-21-allowed",
     )
 
     response = json.loads(FailingWin32File.written.decode("utf-8"))
@@ -610,6 +639,7 @@ def test_windows_host_service_pipe_diagnostic_reason_redacts_sensitive_values(mo
         win32security=_AuthorizedWin32Security,
         win32api=_AuthorizedWin32Api,
         win32con=_AuthorizedWin32Con,
+        allowed_client_sid="S-1-5-21-allowed",
     )
 
     response = json.loads(FailingWin32File.written.decode("utf-8"))
