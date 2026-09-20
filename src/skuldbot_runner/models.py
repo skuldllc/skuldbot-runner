@@ -349,9 +349,16 @@ class HeartbeatRequest(BaseModel):
 class HeartbeatResponse(BaseModel):
     """Heartbeat response."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     acknowledged: bool
     pending_jobs: int | None = None
     server_time: datetime | None = None
+    cancel_run_ids: list[str] = Field(
+        default_factory=list,
+        alias="cancelRunIds",
+        serialization_alias="cancelRunIds",
+    )
 
     @classmethod
     def from_api_payload(cls, payload: Mapping[str, Any]) -> "HeartbeatResponse":
@@ -363,6 +370,9 @@ class HeartbeatResponse(BaseModel):
                 else None
             ),
             server_time=payload.get("serverTime", payload.get("server_time")),
+            cancel_run_ids=list(
+                payload.get("cancelRunIds", payload.get("cancel_run_ids", [])) or []
+            ),
         )
 
 
