@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -18,9 +19,16 @@ from skuldbot_runner.linux_virtual_display import (
 )
 from skuldbot_runner.models import DisplayLease, Job
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
+from skuldbot_runner.windows_session_pool import (
+    WindowsInteractiveSessionPool,
+    slots_from_environment,
+)
 
 RUN_DISPLAY_TESTS = os.environ.get("SKULDBOT_VISUAL_ACTION_INTEGRATION") == "1"
 RUN_XVFB_TESTS = os.environ.get("SKULDBOT_XVFB_VISUAL_ACTION_INTEGRATION") == "1"
+RUN_WINDOWS_CONCURRENT_TESTS = (
+    os.environ.get("SKULDBOT_WINDOWS_CONCURRENT_VISUAL_INTEGRATION") == "1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +55,12 @@ def display_lease_environment(job: Job):
                 os.environ[key] = previous_value
 
 
-def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> DisplayLease:
+def _display_lease(
+    *actions: str,
+    run_id: str = "run-visual-integration",
+    runtime_plane: str = "linux_virtual_display",
+    mode: str = "unattended",
+) -> DisplayLease:
     return DisplayLease.model_validate(
         {
             "leaseId": f"lease-{run_id}",
@@ -60,8 +73,8 @@ def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> Dis
                 "tenantId": "tenant-visual-integration",
                 "runId": run_id,
                 "stepId": "step-visual-integration",
-                "runtimePlane": "linux_virtual_display",
-                "mode": "unattended",
+                "runtimePlane": runtime_plane,
+                "mode": mode,
                 "requiredCapabilities": ["graphical_display"],
                 "requiredVisualActions": list(actions),
                 "sessionCredentialRefs": [],
@@ -71,8 +84,8 @@ def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> Dis
                 "sessionId": "session-visual-integration",
                 "tenantId": "tenant-visual-integration",
                 "runnerId": "runner-visual-integration",
-                "runtimePlane": "linux_virtual_display",
-                "mode": "unattended",
+                "runtimePlane": runtime_plane,
+                "mode": mode,
                 "acquiredAt": "2026-06-03T10:00:00Z",
                 "display": {
                     "state": "active",
@@ -85,6 +98,12 @@ def _display_lease(*actions: str, run_id: str = "run-visual-integration") -> Dis
             },
         }
     )
+
+
+def _read_optional_text(path: Path) -> str:
+    if not path.exists():
+        return "<missing>"
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 @pytest.mark.skipif(
@@ -157,28 +176,74 @@ def test_xvfb_display_executes_visual_keywords_with_lease(tmp_path):
 
 VISUAL_RUNNER_SCRIPT = r"""
 import json
+import os
 import sys
+import time
+import traceback
 
 from skuldbot_runner.visual_keywords import SkuldBotVisualKeywords
 
 artifact_path = sys.argv[1]
-keywords = SkuldBotVisualKeywords()
-screenshot = keywords.desktop_screenshot(artifact_path)
-typed = keywords.desktop_type_text("SkuldBot high density")
-hotkey = keywords.desktop_hotkey("ctrl", "a")
-waited = keywords.desktop_wait_image(artifact_path, timeout_seconds=3)
-clicked = keywords.desktop_image_click(artifact_path)
-print(
-    json.dumps(
+result_path = sys.argv[2] if len(sys.argv) > 2 else ""
+error_path = sys.argv[3] if len(sys.argv) > 3 else ""
+
+try:
+    from PIL import Image, ImageDraw
+    import tkinter as tk
+
+    target_path = os.path.splitext(artifact_path)[0] + "-target.png"
+    image = Image.new("RGB", (140, 90), "#1f6feb")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((8, 8, 132, 82), outline="#f2cc60", width=5)
+    draw.line((16, 70, 124, 20), fill="#ffffff", width=6)
+    draw.ellipse((54, 24, 86, 56), fill="#2da44e", outline="#ffffff", width=4)
+    image.save(target_path)
+
+    root = tk.Tk()
+    root.title("SkuldBot visual target")
+    root.geometry("140x90+120+120")
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+    photo = tk.PhotoImage(file=target_path)
+    label = tk.Label(root, image=photo, borderwidth=0, highlightthickness=0)
+    label.pack()
+    root.update()
+    time.sleep(0.5)
+
+    keywords = SkuldBotVisualKeywords()
+    screenshot = keywords.desktop_screenshot(artifact_path)
+
+    root.update()
+    waited = keywords.desktop_wait_image(target_path, timeout_seconds=5)
+    root.update()
+    clicked = keywords.desktop_image_click(target_path)
+    typed = keywords.desktop_type_text("SkuldBot high density")
+    hotkey = keywords.desktop_hotkey("ctrl", "a")
+    payload = json.dumps(
         {
             "screenshot": screenshot,
+            "targetPath": target_path,
             "typed": typed,
             "hotkey": hotkey,
             "waited": waited,
             "clicked": clicked,
+            "sessionId": os.environ.get("SKULDBOT_WINDOWS_SESSION_ID", ""),
+            "robotUserRef": os.environ.get("SKULDBOT_WINDOWS_ROBOT_USER_REF", ""),
+            "attached": os.environ.get("SKULDBOT_WINDOWS_SESSION_ATTACHED", ""),
         }
     )
-)
+    if result_path:
+        os.makedirs(os.path.dirname(result_path), exist_ok=True)
+        with open(result_path, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+    else:
+        print(payload)
+except Exception:
+    if error_path:
+        os.makedirs(os.path.dirname(error_path), exist_ok=True)
+        with open(error_path, "w", encoding="utf-8") as handle:
+            handle.write(traceback.format_exc())
+    raise
 """
 
 
@@ -234,6 +299,136 @@ def test_xvfb_pool_runs_two_visual_jobs_with_isolated_evidence(tmp_path):
     assert leases[0].display != leases[1].display
     assert artifact_paths[0] != artifact_paths[1]
     for result, artifact_path in zip(results, artifact_paths, strict=True):
+        screenshot = result["screenshot"]
+        assert screenshot["success"] is True
+        assert screenshot["artifactPath"] == str(artifact_path)
+        assert screenshot["sizeBytes"] > 0
+        assert len(screenshot["checksumSha256"]) == 64
+        assert result["typed"]["success"] is True
+        assert result["hotkey"]["success"] is True
+        assert result["waited"]["success"] is True
+        assert result["clicked"]["success"] is True
+
+
+@pytest.mark.skipif(
+    not RUN_WINDOWS_CONCURRENT_TESTS,
+    reason=(
+        "Set SKULDBOT_WINDOWS_CONCURRENT_VISUAL_INTEGRATION=1 on a Windows host "
+        "with two active robot sessions and the host service running."
+    ),
+)
+def test_windows_pool_runs_two_visual_jobs_with_isolated_sessions_and_evidence(tmp_path):
+    if sys.platform != "win32":
+        pytest.skip("Windows concurrent visual integration requires Windows.")
+    pytest.importorskip("RPA.Desktop")
+
+    slots = slots_from_environment(os.environ)
+    if len(slots) < 2:
+        pytest.skip("Configure at least two Windows session pool slots.")
+
+    pool = WindowsInteractiveSessionPool(slots=slots[:2], base_environment=os.environ)
+    run_ids = ("run-windows-a", "run-windows-b")
+    actions = ("screenshot", "type_text", "hotkey", "image_click", "wait_image")
+
+    with ExitStack() as stack:
+        leases = [stack.enter_context(pool.acquire(run_id)) for run_id in run_ids]
+        processes: list[subprocess.Popen[str]] = []
+        artifact_paths = []
+        result_paths = []
+        error_paths = []
+
+        for run_id, lease in zip(run_ids, leases, strict=True):
+            session_temp_root = lease.slot.isolation.temp_root_ref
+            run_root = (
+                Path(session_temp_root) / run_id
+                if session_temp_root
+                else tmp_path / run_id
+            )
+            artifact_path = run_root / "screen.png"
+            template_path = run_root / "screen-template.png"
+            result_path = run_root / "result.json"
+            error_path = run_root / "error.txt"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path = run_root / "screen-target.png"
+            template_path = run_root / "screen-template.png"
+            for stale_path in (
+                artifact_path,
+                target_path,
+                template_path,
+                result_path,
+                error_path,
+            ):
+                stale_path.unlink(missing_ok=True)
+            artifact_paths.append(artifact_path)
+            result_paths.append(result_path)
+            error_paths.append(error_path)
+            display_lease = _display_lease(
+                *actions,
+                run_id=run_id,
+                runtime_plane="windows_interactive",
+                mode="unattended",
+            )
+            env = dict(os.environ)
+            env.update(lease.environment)
+            env.update(build_display_lease_environment(display_lease))
+            env["SKULDBOT_EVIDENCE_ARTIFACT_UPLOAD_REQUIRED"] = "false"
+            processes.append(
+                subprocess.Popen(  # noqa: S603
+                    [
+                        sys.executable,
+                        "-m",
+                        "skuldbot_runner.windows_session_broker",
+                        "--session-id",
+                        lease.slot.session_id,
+                        "--robot-user-ref",
+                        lease.slot.robot_user_ref,
+                        "--credential-ref-key",
+                        lease.slot.credential_ref_key,
+                        "--",
+                        sys.executable,
+                        "-c",
+                        VISUAL_RUNNER_SCRIPT,
+                        str(artifact_path),
+                        str(result_path),
+                        str(error_path),
+                    ],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+        results = []
+        for process, result_path, error_path in zip(
+            processes,
+            result_paths,
+            error_paths,
+            strict=True,
+        ):
+            stdout, stderr = process.communicate(timeout=45)
+            assert process.returncode == 0, (
+                f"visual worker failed with exit={process.returncode}\n"
+                f"result_path={result_path}\n"
+                f"error_path={error_path}\n"
+                f"result_file:\n{_read_optional_text(result_path)}\n"
+                f"error_file:\n{_read_optional_text(error_path)}\n"
+                f"stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            )
+            results.append(json.loads(result_path.read_text(encoding="utf-8")))
+
+    assert leases[0].slot.session_id != leases[1].slot.session_id
+    assert leases[0].slot.robot_user_ref != leases[1].slot.robot_user_ref
+    assert artifact_paths[0] != artifact_paths[1]
+    assert {result["sessionId"] for result in results} == {
+        lease.slot.session_id for lease in leases
+    }
+    assert {result["robotUserRef"] for result in results} == {
+        lease.slot.robot_user_ref for lease in leases
+    }
+    for result, artifact_path in zip(results, artifact_paths, strict=True):
+        assert result["attached"] == "1"
         screenshot = result["screenshot"]
         assert screenshot["success"] is True
         assert screenshot["artifactPath"] == str(artifact_path)
