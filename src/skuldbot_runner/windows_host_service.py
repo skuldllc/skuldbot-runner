@@ -33,8 +33,8 @@ _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _INTERACTIVE_DESKTOP = "winsta0\\default"
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _DIAGNOSTIC_REASONS_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_DIAGNOSTIC_REASONS"
-_ALLOWED_CLIENT_SID_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID"
-_WINDOWS_SID_PATTERN = re.compile(r"^S-\d+(?:-\d+){1,15}$")
+_LOCAL_SYSTEM_SID = "S-1-5-18"
+_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
 _SENSITIVE_MESSAGE_PATTERN = re.compile(
     r"(?i)(password|passwd|secret|token|credential|key)(\s*[=:]\s*)([^,;\s\"']+)"
 )
@@ -356,9 +356,7 @@ class PyWin32NamedPipeHost:
                 "pywin32 is required for the Windows named-pipe host."
             ) from exc
 
-        allowed_client_sid = _read_allowed_client_sid(os.environ)
         pipe_security = _build_pipe_security_attributes(
-            allowed_client_sid,
             pywintypes,
             win32security,
         )
@@ -392,7 +390,6 @@ class PyWin32NamedPipeHost:
                         win32security,
                         win32api,
                         win32con,
-                        allowed_client_sid,
                     ),
                     daemon=True,
                 )
@@ -412,19 +409,16 @@ class PyWin32NamedPipeHost:
         win32security: Any | None = None,
         win32api: Any | None = None,
         win32con: Any | None = None,
-        allowed_client_sid: str | None = None,
     ) -> None:
         try:
             try:
-                if allowed_client_sid is not None:
-                    _verify_connected_pipe_client(
-                        pipe=pipe,
-                        allowed_client_sid=allowed_client_sid,
-                        win32pipe=win32pipe,
-                        win32security=win32security,
-                        win32api=win32api,
-                        win32con=win32con,
-                    )
+                _verify_connected_pipe_client(
+                    pipe=pipe,
+                    win32pipe=win32pipe,
+                    win32security=win32security,
+                    win32api=win32api,
+                    win32con=win32con,
+                )
                 _, data = win32file.ReadFile(pipe, 65536)
                 response = response_from_request_bytes(service, data)
             except Exception as exc:
@@ -503,32 +497,16 @@ def _unhandled_pipe_error_reason(exc: Exception) -> str:
     return f"{reason}: {detail}"
 
 
-def _read_allowed_client_sid(environment: Mapping[str, str]) -> str:
-    """Read the explicit launcher user/group SID allowed to connect to the pipe."""
-
-    allowed_client_sid = environment.get(_ALLOWED_CLIENT_SID_ENV, "").strip()
-    if not allowed_client_sid:
-        raise WindowsHostServiceError(
-            f"{_ALLOWED_CLIENT_SID_ENV} is required for the Windows host service pipe."
-        )
-    if not _WINDOWS_SID_PATTERN.match(allowed_client_sid):
-        raise WindowsHostServiceError(
-            f"{_ALLOWED_CLIENT_SID_ENV} must be a Windows SID string."
-        )
-    return allowed_client_sid
-
-
-def _build_pipe_security_descriptor_sddl(allowed_client_sid: str) -> str:
-    """Build a fail-closed pipe DACL for LocalSystem, admins, and one caller SID."""
+def _build_pipe_security_descriptor_sddl() -> str:
+    """Build a fail-closed pipe DACL for LocalSystem and local administrators."""
 
     # D:P = protected DACL, no inherited default permissions. SY and BA keep
-    # operational/service control access; the explicit SID is the only
-    # non-admin launcher identity allowed through the pipe boundary.
-    return f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{allowed_client_sid})"
+    # operational/service control access. No operator-provided runtime SID is
+    # accepted here: the pipe boundary is intentionally fixed in code.
+    return "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
 
 
 def _build_pipe_security_attributes(
-    allowed_client_sid: str,
     pywintypes: Any,
     win32security: Any,
 ) -> Any:
@@ -536,7 +514,7 @@ def _build_pipe_security_attributes(
 
     security_attributes = pywintypes.SECURITY_ATTRIBUTES()
     security_descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-        _build_pipe_security_descriptor_sddl(allowed_client_sid),
+        _build_pipe_security_descriptor_sddl(),
         win32security.SDDL_REVISION_1,
     )
     security_attributes.SECURITY_DESCRIPTOR = security_descriptor
@@ -546,7 +524,6 @@ def _build_pipe_security_attributes(
 def _verify_connected_pipe_client(
     *,
     pipe: Any,
-    allowed_client_sid: str,
     win32pipe: Any,
     win32security: Any | None,
     win32api: Any | None,
@@ -564,17 +541,17 @@ def _verify_connected_pipe_client(
             win32con.TOKEN_QUERY,
             True,
         )
-        if not _token_contains_sid(thread_token, allowed_client_sid, win32security):
+        if not _token_is_local_system_or_admin(thread_token, win32security):
             raise WindowsHostServiceError("Windows host service pipe client is not authorized.")
     finally:
         win32security.RevertToSelf()
 
 
-def _token_contains_sid(token: Any, allowed_sid: str, win32security: Any) -> bool:
-    """Return true when TokenUser or TokenGroups contains the configured SID."""
+def _token_is_local_system_or_admin(token: Any, win32security: Any) -> bool:
+    """Return true when TokenUser is SYSTEM or TokenGroups includes local Administrators."""
 
     token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
-    if _sid_to_string(token_user[0], win32security).lower() == allowed_sid.lower():
+    if _sid_to_string(token_user[0], win32security).lower() == _LOCAL_SYSTEM_SID.lower():
         return True
 
     try:
@@ -583,7 +560,7 @@ def _token_contains_sid(token: Any, allowed_sid: str, win32security: Any) -> boo
         groups = []
     for group in groups:
         sid = group[0] if isinstance(group, tuple) else group
-        if _sid_to_string(sid, win32security).lower() == allowed_sid.lower():
+        if _sid_to_string(sid, win32security).lower() == _BUILTIN_ADMINISTRATORS_SID.lower():
             return True
     return False
 
