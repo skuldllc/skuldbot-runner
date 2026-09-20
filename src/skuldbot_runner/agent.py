@@ -79,6 +79,8 @@ class RunnerAgent:
         self._active_jobs: dict[str, Job] = {}
         self._active_run_states: dict[str, ActiveRunState] = {}
         self._job_tasks: set[asyncio.Task[None]] = set()
+        self._job_tasks_by_run_id: dict[str, asyncio.Task[None]] = {}
+        self._orchestrator_cancel_requested_run_ids: set[str] = set()
         self._linux_virtual_display_pool: LinuxVirtualDisplayPool | None = None
         self._windows_session_pool: WindowsInteractiveSessionPool | None = None
 
@@ -210,8 +212,12 @@ class RunnerAgent:
                     graphical_capabilities=self._detect_graphical_capabilities(),
                 )
 
-                await self.client.heartbeat(request)
-                logger.debug("Heartbeat sent")
+                response = await self.client.heartbeat(request)
+                await self._handle_heartbeat_cancellations(response.cancel_run_ids)
+                logger.debug(
+                    "Heartbeat sent",
+                    cancel_run_ids=response.cancel_run_ids,
+                )
 
             except Exception as e:
                 logger.warning("Heartbeat failed", error=str(e))
@@ -310,6 +316,8 @@ class RunnerAgent:
                 task = asyncio.create_task(self._execute_job(claimed_job))
                 self._job_tasks.add(task)
                 task.add_done_callback(self._job_tasks.discard)
+                self._job_tasks_by_run_id[claimed_job.id] = task
+                task.add_done_callback(self._forget_job_task(claimed_job.id))
                 remaining_capacity -= 1
                 if job_requires_linux_virtual_display(claimed_job):
                     reserved_linux_virtual_display_slots += 1
@@ -404,6 +412,26 @@ class RunnerAgent:
                 duration_ms=result.duration_ms,
             )
 
+        except asyncio.CancelledError:
+            logger.warning("Job cancelled by Orchestrator", run_id=job.id)
+            if job.id not in self._orchestrator_cancel_requested_run_ids:
+                self.executor.cancel_run(job.id)
+            await self.client.complete_run(
+                RunResult(
+                    run_id=job.id,
+                    status=RunStatus.CANCELLED,
+                    started_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                    duration_ms=0,
+                    steps_completed=0,
+                    steps_failed=0,
+                    error="Cancelled by Orchestrator",
+                    logs=["Execution cancelled by Orchestrator."],
+                    artifacts=[],
+                )
+            )
+            raise
+
         except Exception as e:
             logger.exception("Job execution failed", run_id=job.id, error=str(e))
 
@@ -426,6 +454,7 @@ class RunnerAgent:
         finally:
             self._active_jobs.pop(job.id, None)
             self._active_run_states.pop(job.id, None)
+            self._orchestrator_cancel_requested_run_ids.discard(job.id)
             self._refresh_current_job_projection()
 
     def _active_run_ids(self) -> list[str]:
@@ -450,6 +479,29 @@ class RunnerAgent:
         """Keep the legacy web status field as a one-job projection only."""
 
         self.current_job = next(iter(self._active_jobs.values()), None)
+
+    async def _handle_heartbeat_cancellations(self, run_ids: list[str]) -> None:
+        """Cancel exactly the active runs requested by Orchestrator."""
+
+        for run_id in run_ids:
+            task = self._job_tasks_by_run_id.get(run_id)
+            if task is None or task.done():
+                continue
+            logger.warning(
+                "Cancelling active run from heartbeat signal",
+                run_id=run_id,
+            )
+            self._orchestrator_cancel_requested_run_ids.add(run_id)
+            self.executor.cancel_run(run_id)
+            task.cancel()
+
+    def _forget_job_task(self, run_id: str):
+        """Build a done callback that removes the run-to-task index."""
+
+        def forget(_task: asyncio.Task[None]) -> None:
+            self._job_tasks_by_run_id.pop(run_id, None)
+
+        return forget
 
     async def _download_package(self, job: Job) -> str:
         """Download bot package to temp file."""

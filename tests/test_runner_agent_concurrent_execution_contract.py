@@ -23,7 +23,14 @@ from skuldbot_runner.linux_virtual_display import (
     LinuxVirtualDisplayConfig,
     LinuxVirtualDisplayPool,
 )
-from skuldbot_runner.models import DisplayLease, Job, RunResult, RunStatus
+from skuldbot_runner.models import (
+    ClaimResponse,
+    DisplayLease,
+    HeartbeatResponse,
+    Job,
+    RunResult,
+    RunStatus,
+)
 from skuldbot_runner.windows_session_pool import (
     WindowsInteractiveSessionPool,
     WindowsSessionSlot,
@@ -82,6 +89,11 @@ class _ConcurrentRecordingExecutor:
         self.environments: dict[str, dict[str, str]] = {}
         self.all_started = asyncio.Event()
         self.release = asyncio.Event()
+        self.cancelled_runs: list[str] = []
+
+    def cancel_run(self, run_id: str) -> bool:
+        self.cancelled_runs.append(run_id)
+        return True
 
     async def execute(self, *, job, execution_environment=None, **_kwargs):
         self.environments[job.id] = dict(execution_environment or {})
@@ -168,6 +180,33 @@ class _RecordingClient:
     async def complete_run(self, result: RunResult) -> None:
         self.completed.append(result.run_id)
         self.results.append(result)
+
+
+class _HeartbeatCancellationClient(_RecordingClient):
+    def __init__(self, jobs: list[Job], cancel_run_ids: list[str]) -> None:
+        super().__init__()
+        self._jobs = list(jobs)
+        self._cancel_run_ids = list(cancel_run_ids)
+        self.heartbeat_seen = asyncio.Event()
+
+    async def get_pending_jobs(self) -> list[Job]:
+        jobs = self._jobs
+        self._jobs = []
+        return jobs
+
+    async def claim_job(self, run_id: str) -> ClaimResponse:
+        return ClaimResponse(
+            success=True,
+            job=Job(id=run_id, package_url=f"memory://{run_id}.skb"),
+        )
+
+    async def heartbeat(self, _request) -> HeartbeatResponse:
+        self.heartbeat_seen.set()
+        return HeartbeatResponse(
+            acknowledged=True,
+            pending_jobs=0,
+            cancel_run_ids=list(self._cancel_run_ids),
+        )
 
 
 class _ConcurrentTestAgent(RunnerAgent):
@@ -309,6 +348,53 @@ async def test_execute_job_runs_two_windows_visual_jobs_with_isolated_session_re
     assert agent._windows_session_pool.active_count == 0
     assert agent._active_run_ids() == []
     assert sorted(agent.client.completed) == ["run-windows-a", "run-windows-b"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_kill_switch_cancels_only_the_target_active_run():
+    executor = _ConcurrentRecordingExecutor(expected_jobs=2)
+    jobs = [
+        Job(id="run-cancel-target", package_url="memory://run-cancel-target.skb"),
+        Job(id="run-survivor", package_url="memory://run-survivor.skb"),
+    ]
+    agent = _ConcurrentTestAgent(
+        RunnerConfig(
+            runner_name="kill-switch-agent",
+            max_concurrent_jobs=2,
+            heartbeat_interval_seconds=60,
+        )
+    )
+    client = _HeartbeatCancellationClient(
+        jobs=jobs,
+        cancel_run_ids=["run-cancel-target"],
+    )
+    agent.client = client
+    agent.executor = executor
+
+    await agent._check_for_jobs()
+    await asyncio.wait_for(executor.all_started.wait(), timeout=5)
+    job_tasks = list(agent._job_tasks)
+    assert set(agent._active_run_ids()) == {"run-cancel-target", "run-survivor"}
+
+    agent.running = True
+    heartbeat_task = asyncio.create_task(agent._heartbeat_loop())
+    await asyncio.wait_for(client.heartbeat_seen.wait(), timeout=5)
+    await asyncio.sleep(0)
+
+    assert executor.cancelled_runs == ["run-cancel-target"]
+    assert "run-survivor" in agent._active_run_ids()
+
+    executor.release.set()
+    await asyncio.gather(*job_tasks, return_exceptions=True)
+    agent.running = False
+    heartbeat_task.cancel()
+    await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+    assert sorted(client.completed) == ["run-cancel-target", "run-survivor"]
+    result_by_run = {result.run_id: result for result in client.results}
+    assert result_by_run["run-cancel-target"].status is RunStatus.CANCELLED
+    assert result_by_run["run-survivor"].status is RunStatus.SUCCEEDED
+    assert agent._active_run_ids() == []
 
 
 @pytest.mark.asyncio

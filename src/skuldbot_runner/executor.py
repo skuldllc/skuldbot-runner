@@ -45,6 +45,17 @@ class BotExecutor:
         self.config = config
         self.work_dir = Path(config.work_dir)
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        self._active_processes: dict[str, asyncio.subprocess.Process] = {}
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Terminate the subprocess currently executing a run, if one exists."""
+
+        process = self._active_processes.get(run_id)
+        if process is None or process.returncode is not None:
+            return False
+        logger.warning("Killing active run subprocess", run_id=run_id)
+        process.kill()
+        return True
 
     async def execute(
         self,
@@ -247,6 +258,7 @@ class BotExecutor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._active_processes[job_id] = process
 
         collected_logs: list[str] = []
 
@@ -294,12 +306,19 @@ class BotExecutor:
                 process.wait(),
                 timeout=self.config.job_timeout_seconds
             )
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
             raise TimeoutError(
                 f"Robot execution timed out after {self.config.job_timeout_seconds}s"
             )
+        finally:
+            if self._active_processes.get(job_id) is process:
+                self._active_processes.pop(job_id, None)
 
         # Parse output.xml for detailed results
         output_xml = output_dir / "output.xml"
@@ -405,18 +424,26 @@ class BotExecutor:
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        self._active_processes[job.id] = process
 
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=self.config.job_timeout_seconds,
             )
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
         except asyncio.TimeoutError as exc:
             process.kill()
             await process.wait()
             raise TimeoutError(
                 f"Runtime worker timed out after {self.config.job_timeout_seconds}s"
             ) from exc
+        finally:
+            if self._active_processes.get(job.id) is process:
+                self._active_processes.pop(job.id, None)
         if process.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
             stdout_text = stdout.decode("utf-8", errors="replace").strip()
