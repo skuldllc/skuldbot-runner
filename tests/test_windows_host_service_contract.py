@@ -16,6 +16,7 @@ from skuldbot_runner.windows_host_service import (
     WindowsHostServiceError,
     WindowsRobotCredential,
     _build_pipe_security_descriptor_sddl,
+    _NoopWindowsHostEventLogger,
     _read_allowed_client_sid,
     _token_is_allowed_pipe_client,
     parse_launch_payload,
@@ -58,6 +59,18 @@ class _CapturingAdapter:
         self.request = request
         self.credential = credential
         return self.exit_code
+
+
+class _CapturingEventLogger:
+    def __init__(self):
+        self.warnings = []
+        self.errors = []
+
+    def warning(self, message: str) -> None:
+        self.warnings.append(message)
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
 
 
 class _AuthorizedWin32Api:
@@ -291,6 +304,23 @@ def test_windows_host_service_pipe_request_accepts_supported_frame_types():
         "accepted": True,
         "exitCode": 0,
     }
+
+
+def test_windows_host_service_pipe_request_accepts_health_frame_without_launching():
+    adapter = _CapturingAdapter(exit_code=99)
+    service = WindowsHostService(
+        adapter=adapter,
+        secret_resolver=_secret_resolver,
+        platform_system="Linux",
+    )
+
+    response = response_from_request_bytes(
+        service,
+        b'{"protocolVersion":1,"action":"health"}',
+    )
+
+    assert response == {"accepted": True, "status": "healthy"}
+    assert adapter.request is None
 
 
 def test_windows_host_service_pipe_request_rejects_unsupported_frame_type():
@@ -543,18 +573,21 @@ def test_windows_host_service_pipe_denies_unauthorized_client_before_reading_pay
         win32api=FakeWin32Api,
         win32con=FakeWin32Con,
         allowed_client_sid="S-1-5-21-allowed",
+        event_logger=(event_logger := _CapturingEventLogger()),
     )
 
     response = json.loads(CapturingWin32File.written.decode("utf-8"))
 
     assert response == {
         "accepted": False,
-        "reason": "Windows host service request failed: WindowsHostServiceError",
+        "reason": "Windows host service request failed: WindowsHostUnauthorizedClientError",
     }
     assert CapturingWin32Pipe.impersonated is True
     assert RejectingWin32Security.reverted is True
     assert CapturingWin32Pipe.disconnected is True
     assert CapturingWin32File.read_called is False
+    assert event_logger.warnings == ["Rejected unauthorized Windows host service pipe client."]
+    assert event_logger.errors == []
 
 
 def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
@@ -593,6 +626,7 @@ def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
         win32api=_AuthorizedWin32Api,
         win32con=_AuthorizedWin32Con,
         allowed_client_sid="S-1-5-21-allowed",
+        event_logger=(event_logger := _CapturingEventLogger()),
     )
 
     response = json.loads(FailingWin32File.written.decode("utf-8"))
@@ -602,6 +636,7 @@ def test_windows_host_service_pipe_thread_returns_denial_on_unhandled_error():
         "reason": "Windows host service request failed: RuntimeError",
     }
     assert CapturingWin32Pipe.disconnected is True
+    assert event_logger.errors == ["Unhandled Windows host service pipe exception: RuntimeError"]
 
 
 def test_windows_host_service_pipe_diagnostic_reason_redacts_sensitive_values(monkeypatch):
@@ -653,6 +688,55 @@ def test_windows_host_service_pipe_diagnostic_reason_redacts_sensitive_values(mo
     assert "bravo" not in response["reason"]
     assert "charlie" not in response["reason"]
     assert "delta" not in response["reason"]
+
+
+def test_windows_host_service_shutdown_delegates_to_adapter_cleanup():
+    class CleanupAdapter(_CapturingAdapter):
+        def shutdown_active_processes(self):
+            self.cleaned = True
+            return 2
+
+    adapter = CleanupAdapter()
+    service = WindowsHostService(
+        adapter=adapter,
+        secret_resolver=_secret_resolver,
+        platform_system="Windows",
+    )
+
+    assert service.shutdown() == 2
+    assert adapter.cleaned is True
+
+
+def test_windows_process_adapter_shutdown_terminates_tracked_process_handles(monkeypatch):
+    terminated = []
+
+    class FakeKernel32:
+        @staticmethod
+        def TerminateProcess(handle, exit_code):
+            terminated.append((handle, exit_code))
+            return True
+
+        @staticmethod
+        def CloseHandle(_handle):
+            return True
+
+    monkeypatch.setattr(
+        "skuldbot_runner.windows_host_service._load_windows_process_libraries",
+        lambda: (object(), FakeKernel32, object()),
+    )
+    adapter = PyWin32SessionProcessAdapter(platform_system="Windows")
+    adapter._track_process_handle(101)
+    adapter._track_process_handle(202)
+
+    assert adapter.shutdown_active_processes() == 2
+    assert sorted(terminated) == [(101, 1), (202, 1)]
+
+
+def test_windows_host_event_logger_noops_when_servicemanager_unavailable():
+    logger = _NoopWindowsHostEventLogger()
+
+    logger.warning("warning")
+    logger.error("error")
 
 
 def test_windows_host_service_real_attach_integration_env_gated():

@@ -13,8 +13,10 @@ process.
 from __future__ import annotations
 
 import argparse
+import json
 import platform
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -32,7 +34,21 @@ _SERVICE_DESCRIPTION = (
     "Privileged local service that launches SkuldBot workers inside assigned "
     "Windows robot sessions through a refs-only named-pipe protocol."
 )
-_ALLOWED_ACTIONS = {"install", "update", "remove", "start", "stop", "restart", "status", "debug"}
+_ALLOWED_ACTIONS = {
+    "install",
+    "update",
+    "remove",
+    "start",
+    "stop",
+    "restart",
+    "status",
+    "health",
+    "debug",
+}
+_FAILURE_ACTION_RESET_SECONDS = 24 * 60 * 60
+_FAILURE_ACTION_RESTART_DELAY_MS = 60 * 1000
+_SERVICE_STOP_TIMEOUT_SECONDS = 30
+_PIPE_HEALTH_TIMEOUT_MS = 5 * 1000
 _IS_WINDOWS = platform.system().lower() == "windows"
 
 
@@ -78,15 +94,21 @@ if win32serviceutil is not None:
         def SvcDoRun(self) -> None:  # noqa: N802 - pywin32 service API
             servicemanager.LogInfoMsg(f"{_SERVICE_DISPLAY_NAME} starting")
             self.ReportServiceStatus(win32service.SERVICE_RUNNING)
-            self.host.serve_forever(
-                WindowsHostService(),
-                stop_requested=lambda: win32event.WaitForSingleObject(
-                    self.stop_event,
-                    0,
+            try:
+                self.host.serve_forever(
+                    WindowsHostService(),
+                    stop_requested=lambda: win32event.WaitForSingleObject(
+                        self.stop_event,
+                        0,
+                    )
+                    == win32event.WAIT_OBJECT_0,
                 )
-                == win32event.WAIT_OBJECT_0,
-            )
-            servicemanager.LogInfoMsg(f"{_SERVICE_DISPLAY_NAME} stopped")
+                servicemanager.LogInfoMsg(f"{_SERVICE_DISPLAY_NAME} stopped")
+            except Exception as exc:
+                servicemanager.LogErrorMsg(
+                    f"{_SERVICE_DISPLAY_NAME} failed: {type(exc).__name__}"
+                )
+                raise
 
 else:
     SkuldBotWindowsHostService = None
@@ -154,6 +176,12 @@ def _run_pywin32_service_command(config: WindowsHostServiceManagerConfig) -> int
     the contract without pywin32 installed.
     """
 
+    if config.action == "health":
+        _run_health_check(config)
+        return 0
+    if config.action == "remove":
+        _stop_service_if_running(_SERVICE_NAME)
+
     command_argv = [sys.argv[0]]
     if config.action in {"install", "update"}:
         command_argv.extend(
@@ -167,9 +195,118 @@ def _run_pywin32_service_command(config: WindowsHostServiceManagerConfig) -> int
     try:
         sys.argv = command_argv
         win32serviceutil.HandleCommandLine(SkuldBotWindowsHostService)
+        if config.action in {"install", "update"}:
+            _configure_failure_actions(_SERVICE_NAME)
         return 0
     finally:
         sys.argv = original_argv
+
+
+def build_failure_actions_config(win32service_module: Any) -> dict[str, Any]:
+    """Build Windows SCM restart-on-crash policy for the host service."""
+
+    return {
+        "ResetPeriod": _FAILURE_ACTION_RESET_SECONDS,
+        "RebootMsg": "",
+        "Command": "",
+        "Actions": [
+            (win32service_module.SC_ACTION_RESTART, _FAILURE_ACTION_RESTART_DELAY_MS),
+            (win32service_module.SC_ACTION_RESTART, _FAILURE_ACTION_RESTART_DELAY_MS),
+            (win32service_module.SC_ACTION_RESTART, _FAILURE_ACTION_RESTART_DELAY_MS),
+        ],
+    }
+
+
+def _configure_failure_actions(service_name: str) -> None:
+    scm_handle = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+    try:
+        service_handle = win32service.OpenService(
+            scm_handle,
+            service_name,
+            win32service.SERVICE_CHANGE_CONFIG,
+        )
+        try:
+            win32service.ChangeServiceConfig2(
+                service_handle,
+                win32service.SERVICE_CONFIG_FAILURE_ACTIONS,
+                build_failure_actions_config(win32service),
+            )
+        finally:
+            win32service.CloseServiceHandle(service_handle)
+    finally:
+        win32service.CloseServiceHandle(scm_handle)
+
+
+def _stop_service_if_running(service_name: str) -> None:
+    try:
+        status = win32serviceutil.QueryServiceStatus(service_name)
+    except Exception:
+        return
+    if _current_service_state(status) == win32service.SERVICE_STOPPED:
+        return
+
+    win32serviceutil.StopService(service_name)
+    deadline = time.monotonic() + _SERVICE_STOP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        status = win32serviceutil.QueryServiceStatus(service_name)
+        if _current_service_state(status) == win32service.SERVICE_STOPPED:
+            return
+        time.sleep(0.5)
+    raise WindowsHostServiceManagerError("Windows host service did not stop before removal.")
+
+
+def _run_health_check(config: WindowsHostServiceManagerConfig) -> None:
+    status = win32serviceutil.QueryServiceStatus(_SERVICE_NAME)
+    if _current_service_state(status) != win32service.SERVICE_RUNNING:
+        raise WindowsHostServiceManagerError("Windows host service is not running.")
+
+    response = _check_pipe_health(config.pipe_name)
+    if response != {"accepted": True, "status": "healthy"}:
+        raise WindowsHostServiceManagerError("Windows host service pipe health check failed.")
+    print("Windows host service health: healthy")
+
+
+def _check_pipe_health(pipe_name: str) -> dict[str, Any]:
+    try:
+        import win32con
+        import win32file
+        import win32pipe
+    except ImportError as exc:
+        raise WindowsHostServiceManagerError(
+            "pywin32 is required to health-check the Windows host service."
+        ) from exc
+
+    pipe = None
+    try:
+        win32pipe.WaitNamedPipe(pipe_name, _PIPE_HEALTH_TIMEOUT_MS)
+        pipe = win32file.CreateFile(
+            pipe_name,
+            win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+            0,
+            None,
+            win32con.OPEN_EXISTING,
+            0,
+            None,
+        )
+        win32pipe.SetNamedPipeHandleState(pipe, win32pipe.PIPE_READMODE_MESSAGE, None, None)
+        request = json.dumps({"protocolVersion": 1, "action": "health"}).encode("utf-8")
+        win32file.WriteFile(pipe, request)
+        _error_code, response_bytes = win32file.ReadFile(pipe, 65536)
+        return json.loads(response_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise WindowsHostServiceManagerError(
+            f"Windows host service pipe health check failed: {type(exc).__name__}"
+        ) from exc
+    finally:
+        if pipe is not None:
+            try:
+                win32file.CloseHandle(pipe)
+            except Exception:
+                pass
+
+
+def _current_service_state(status: Any) -> Any:
+    return status[1]
 
 
 def _read_action(value: Any) -> str:
