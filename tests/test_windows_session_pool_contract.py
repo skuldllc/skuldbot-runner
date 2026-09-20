@@ -146,6 +146,19 @@ def test_windows_session_pool_allocates_distinct_slots_and_reuses_after_release(
         with pool.acquire("run-b") as lease_b:
             assert lease_b.slot.session_id == "session-2"
             assert lease_b.environment["SKULDBOT_WINDOWS_SESSION_ID"] == "session-2"
+            assert lease_a.environment["SKULDBOT_WINDOWS_ROBOT_USER_REF"] != (
+                lease_b.environment["SKULDBOT_WINDOWS_ROBOT_USER_REF"]
+            )
+            assert lease_a.environment["SKULDBOT_WINDOWS_SESSION_PROFILE_REF"] != (
+                lease_b.environment["SKULDBOT_WINDOWS_SESSION_PROFILE_REF"]
+            )
+            assert lease_a.environment["SKULDBOT_WINDOWS_SESSION_TEMP_ROOT_REF"] != (
+                lease_b.environment["SKULDBOT_WINDOWS_SESSION_TEMP_ROOT_REF"]
+            )
+            assert (
+                lease_a.environment["SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF"]
+                != lease_b.environment["SKULDBOT_WINDOWS_SESSION_DOWNLOADS_ROOT_REF"]
+            )
             assert pool.active_count == 2
             assert pool.available_count == 0
 

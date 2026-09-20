@@ -3,6 +3,11 @@
 
 import json
 
+from skuldbot_runner.active_runs import (
+    active_run_ids,
+    active_run_states_for_heartbeat,
+    primary_active_run_id,
+)
 from skuldbot_runner.graphical_runtime import (
     GraphicalProbeInput,
     build_display_lease_environment,
@@ -11,6 +16,7 @@ from skuldbot_runner.graphical_runtime import (
     windows_session_pool_capacity_from_environment,
 )
 from skuldbot_runner.models import (
+    ActiveRunState,
     DisplayLease,
     DisplayLeaseState,
     GraphicalDisplayState,
@@ -569,4 +575,89 @@ def test_heartbeat_contract_payload_includes_graphical_capability_when_declared(
     assert payload["graphicalCapabilities"]["hasDisplay"] is True
     assert payload["graphicalCapabilities"]["supportedRuntimePlanes"] == [
         "linux_virtual_display"
+    ]
+
+
+def test_heartbeat_contract_reports_all_active_runs_without_collapsing():
+    request = HeartbeatRequest(
+        status="busy",
+        active_run_ids=["run-a", "run-b"],
+        active_runs=[
+            ActiveRunState(
+                run_id="run-a",
+                runtime_plane="linux_virtual_display",
+                slot_id=":100",
+                isolation={"display": ":100"},
+            ),
+            ActiveRunState(
+                run_id="run-b",
+                runtime_plane="windows_interactive",
+                slot_id="session-1",
+                isolation={
+                    "robotUserRef": "robot-user-1",
+                    "inputIsolated": True,
+                    "clipboardIsolated": True,
+                },
+            ),
+        ],
+    )
+
+    payload = build_heartbeat_payload(request)
+
+    assert payload["status"] == "busy"
+    assert payload["currentRunId"] == "run-a"
+    assert payload["activeRunIds"] == ["run-a", "run-b"]
+    assert payload["activeRuns"] == [
+        {
+            "runId": "run-a",
+            "runtimePlane": "linux_virtual_display",
+            "slotId": ":100",
+            "isolation": {"display": ":100"},
+        },
+        {
+            "runId": "run-b",
+            "runtimePlane": "windows_interactive",
+            "slotId": "session-1",
+            "isolation": {
+                "robotUserRef": "robot-user-1",
+                "inputIsolated": True,
+                "clipboardIsolated": True,
+            },
+        },
+    ]
+
+
+def test_active_run_heartbeat_state_keeps_all_active_jobs():
+    active_jobs = {"run-a": object(), "run-b": object()}
+    active_run_states = {
+        "run-a": ActiveRunState(
+            run_id="run-a",
+            runtime_plane="linux_virtual_display",
+            slot_id=":100",
+            isolation={"display": ":100"},
+        ),
+        "run-b": ActiveRunState(
+            run_id="run-b",
+            runtime_plane="windows_interactive",
+            slot_id="session-1",
+        ),
+    }
+
+    assert primary_active_run_id(active_jobs) == "run-a"
+    assert active_run_ids(active_jobs) == ["run-a", "run-b"]
+    assert [
+        state.model_dump(by_alias=True, exclude_none=True)
+        for state in active_run_states_for_heartbeat(active_jobs, active_run_states)
+    ] == [
+        {
+            "runId": "run-a",
+            "runtimePlane": "linux_virtual_display",
+            "slotId": ":100",
+            "isolation": {"display": ":100"},
+        },
+        {
+            "runId": "run-b",
+            "runtimePlane": "windows_interactive",
+            "slotId": "session-1",
+        },
     ]

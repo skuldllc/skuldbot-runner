@@ -13,6 +13,11 @@ from pathlib import Path
 
 import structlog
 
+from .active_runs import (
+    active_run_ids,
+    active_run_states_for_heartbeat,
+    primary_active_run_id,
+)
 from .api_client import OrchestratorClient
 from .config import RunnerConfig
 from .executor import BotExecutor
@@ -23,6 +28,7 @@ from .linux_virtual_display import (
     should_start_linux_virtual_display,
 )
 from .models import (
+    ActiveRunState,
     HeartbeatRequest,
     Job,
     LogEntry,
@@ -71,6 +77,7 @@ class RunnerAgent:
         self.running = False
         self.current_job: Job | None = None
         self._active_jobs: dict[str, Job] = {}
+        self._active_run_states: dict[str, ActiveRunState] = {}
         self._job_tasks: set[asyncio.Task[None]] = set()
         self._linux_virtual_display_pool: LinuxVirtualDisplayPool | None = None
         self._windows_session_pool: WindowsInteractiveSessionPool | None = None
@@ -196,7 +203,9 @@ class RunnerAgent:
 
                 request = HeartbeatRequest(
                     status="busy" if self._active_jobs else "online",
-                    current_run_id=next(iter(self._active_jobs), None),
+                    current_run_id=self._primary_active_run_id(),
+                    active_run_ids=self._active_run_ids(),
+                    active_runs=self._active_run_states_for_heartbeat(),
                     system_info=system_info,
                     graphical_capabilities=self._detect_graphical_capabilities(),
                 )
@@ -316,7 +325,8 @@ class RunnerAgent:
     async def _execute_job(self, job: Job):
         """Execute a claimed job."""
         self._active_jobs[job.id] = job
-        self.current_job = next(iter(self._active_jobs.values()), None)
+        self._active_run_states[job.id] = ActiveRunState(run_id=job.id)
+        self._refresh_current_job_projection()
         logger.info("Executing job", run_id=job.id, bot_name=job.bot_name)
 
         try:
@@ -333,6 +343,12 @@ class RunnerAgent:
                         "Run requires linux_virtual_display but no display pool is configured."
                     )
                 with self._linux_virtual_display_pool.acquire(job.id) as display_lease:
+                    self._active_run_states[job.id] = ActiveRunState(
+                        run_id=job.id,
+                        runtime_plane="linux_virtual_display",
+                        slot_id=display_lease.display,
+                        isolation={"display": display_lease.display},
+                    )
                     result = await self.executor.execute(
                         job=job,
                         package_path=package_path,
@@ -345,6 +361,26 @@ class RunnerAgent:
                         "Run requires windows_interactive but no session pool is configured."
                     )
                 with self._windows_session_pool.acquire(job.id) as session_lease:
+                    self._active_run_states[job.id] = ActiveRunState(
+                        run_id=job.id,
+                        runtime_plane="windows_interactive",
+                        slot_id=session_lease.slot.session_id,
+                        isolation={
+                            "kind": session_lease.slot.isolation.kind,
+                            "robotUserRef": session_lease.slot.robot_user_ref,
+                            "inputIsolated": (
+                                session_lease.slot.isolation.input_isolated
+                            ),
+                            "clipboardIsolated": (
+                                session_lease.slot.isolation.clipboard_isolated
+                            ),
+                            "profileRef": session_lease.slot.isolation.profile_ref,
+                            "tempRootRef": session_lease.slot.isolation.temp_root_ref,
+                            "downloadsRootRef": (
+                                session_lease.slot.isolation.downloads_root_ref
+                            ),
+                        },
+                    )
                     result = await self.executor.execute(
                         job=job,
                         package_path=package_path,
@@ -389,7 +425,31 @@ class RunnerAgent:
 
         finally:
             self._active_jobs.pop(job.id, None)
-            self.current_job = next(iter(self._active_jobs.values()), None)
+            self._active_run_states.pop(job.id, None)
+            self._refresh_current_job_projection()
+
+    def _active_run_ids(self) -> list[str]:
+        """Return every active run id without collapsing concurrent runs."""
+
+        return active_run_ids(self._active_jobs)
+
+    def _primary_active_run_id(self) -> str | None:
+        """Return the legacy one-run heartbeat projection, if any."""
+
+        return primary_active_run_id(self._active_jobs)
+
+    def _active_run_states_for_heartbeat(self) -> list[ActiveRunState]:
+        """Return heartbeat details for every active run."""
+
+        return active_run_states_for_heartbeat(
+            self._active_jobs,
+            self._active_run_states,
+        )
+
+    def _refresh_current_job_projection(self) -> None:
+        """Keep the legacy web status field as a one-job projection only."""
+
+        self.current_job = next(iter(self._active_jobs.values()), None)
 
     async def _download_package(self, job: Job) -> str:
         """Download bot package to temp file."""

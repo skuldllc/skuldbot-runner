@@ -310,6 +310,20 @@ class RegisterResponse(BaseModel):
 # ============================================
 
 
+class ActiveRunState(BaseModel):
+    """One currently active run and the isolated runtime slot it owns."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    run_id: str = Field(serialization_alias="runId")
+    runtime_plane: str | None = Field(
+        default=None,
+        serialization_alias="runtimePlane",
+    )
+    slot_id: str | None = Field(default=None, serialization_alias="slotId")
+    isolation: dict[str, Any] | None = None
+
+
 class HeartbeatRequest(BaseModel):
     """Heartbeat request with current status."""
 
@@ -317,6 +331,14 @@ class HeartbeatRequest(BaseModel):
 
     status: str = "online"  # online, busy, offline
     current_run_id: str | None = None
+    active_run_ids: list[str] = Field(
+        default_factory=list,
+        serialization_alias="activeRunIds",
+    )
+    active_runs: list["ActiveRunState"] = Field(
+        default_factory=list,
+        serialization_alias="activeRuns",
+    )
     system_info: SystemInfo | None = None
     graphical_capabilities: GraphicalRunnerCapabilities | None = Field(
         default=None,
