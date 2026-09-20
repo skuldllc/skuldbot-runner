@@ -33,6 +33,8 @@ _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _INTERACTIVE_DESKTOP = "winsta0\\default"
 _ATTACHED_SESSION_ENV = "SKULDBOT_WINDOWS_SESSION_ATTACHED"
 _DIAGNOSTIC_REASONS_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_DIAGNOSTIC_REASONS"
+_ALLOWED_CLIENT_SID_ENV = "SKULDBOT_WINDOWS_HOST_SERVICE_ALLOWED_CLIENT_SID"
+_WINDOWS_SID_PATTERN = re.compile(r"^S-\d+(?:-\d+){1,15}$")
 _SENSITIVE_MESSAGE_PATTERN = re.compile(
     r"(?i)(password|passwd|secret|token|credential|key)(\s*[=:]\s*)([^,;\s\"']+)"
 )
@@ -343,13 +345,23 @@ class PyWin32NamedPipeHost:
         if platform.system().lower() != "windows":
             raise WindowsHostServiceError("Windows named-pipe host requires Windows.")
         try:
+            import pywintypes
+            import win32api
+            import win32con
             import win32file
             import win32pipe
+            import win32security
         except ImportError as exc:
             raise WindowsHostServiceError(
                 "pywin32 is required for the Windows named-pipe host."
             ) from exc
 
+        allowed_client_sid = _read_allowed_client_sid(os.environ)
+        pipe_security = _build_pipe_security_attributes(
+            allowed_client_sid,
+            pywintypes,
+            win32security,
+        )
         workers: list[threading.Thread] = []
         while not (stop_requested and stop_requested()):
             pipe = win32pipe.CreateNamedPipe(
@@ -362,7 +374,7 @@ class PyWin32NamedPipeHost:
                 65536,
                 65536,
                 0,
-                None,
+                pipe_security,
             )
             try:
                 win32pipe.ConnectNamedPipe(pipe, None)
@@ -372,7 +384,16 @@ class PyWin32NamedPipeHost:
                     continue
                 worker = threading.Thread(
                     target=self._handle_connected_pipe,
-                    args=(pipe, service, win32file, win32pipe),
+                    args=(
+                        pipe,
+                        service,
+                        win32file,
+                        win32pipe,
+                        win32security,
+                        win32api,
+                        win32con,
+                        allowed_client_sid,
+                    ),
                     daemon=True,
                 )
                 worker.start()
@@ -388,9 +409,22 @@ class PyWin32NamedPipeHost:
         service: WindowsHostService,
         win32file: Any,
         win32pipe: Any,
+        win32security: Any | None = None,
+        win32api: Any | None = None,
+        win32con: Any | None = None,
+        allowed_client_sid: str | None = None,
     ) -> None:
         try:
             try:
+                if allowed_client_sid is not None:
+                    _verify_connected_pipe_client(
+                        pipe=pipe,
+                        allowed_client_sid=allowed_client_sid,
+                        win32pipe=win32pipe,
+                        win32security=win32security,
+                        win32api=win32api,
+                        win32con=win32con,
+                    )
                 _, data = win32file.ReadFile(pipe, 65536)
                 response = response_from_request_bytes(service, data)
             except Exception as exc:
@@ -467,6 +501,98 @@ def _unhandled_pipe_error_reason(exc: Exception) -> str:
     if len(detail) > 240:
         detail = f"{detail[:237]}..."
     return f"{reason}: {detail}"
+
+
+def _read_allowed_client_sid(environment: Mapping[str, str]) -> str:
+    """Read the explicit launcher user/group SID allowed to connect to the pipe."""
+
+    allowed_client_sid = environment.get(_ALLOWED_CLIENT_SID_ENV, "").strip()
+    if not allowed_client_sid:
+        raise WindowsHostServiceError(
+            f"{_ALLOWED_CLIENT_SID_ENV} is required for the Windows host service pipe."
+        )
+    if not _WINDOWS_SID_PATTERN.match(allowed_client_sid):
+        raise WindowsHostServiceError(
+            f"{_ALLOWED_CLIENT_SID_ENV} must be a Windows SID string."
+        )
+    return allowed_client_sid
+
+
+def _build_pipe_security_descriptor_sddl(allowed_client_sid: str) -> str:
+    """Build a fail-closed pipe DACL for LocalSystem, admins, and one caller SID."""
+
+    # D:P = protected DACL, no inherited default permissions. SY and BA keep
+    # operational/service control access; the explicit SID is the only
+    # non-admin launcher identity allowed through the pipe boundary.
+    return f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{allowed_client_sid})"
+
+
+def _build_pipe_security_attributes(
+    allowed_client_sid: str,
+    pywintypes: Any,
+    win32security: Any,
+) -> Any:
+    """Create pywin32 SECURITY_ATTRIBUTES for CreateNamedPipe."""
+
+    security_attributes = pywintypes.SECURITY_ATTRIBUTES()
+    security_descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        _build_pipe_security_descriptor_sddl(allowed_client_sid),
+        win32security.SDDL_REVISION_1,
+    )
+    security_attributes.SECURITY_DESCRIPTOR = security_descriptor
+    return security_attributes
+
+
+def _verify_connected_pipe_client(
+    *,
+    pipe: Any,
+    allowed_client_sid: str,
+    win32pipe: Any,
+    win32security: Any | None,
+    win32api: Any | None,
+    win32con: Any | None,
+) -> None:
+    """Impersonate and verify that one connected pipe client has the allowed SID."""
+
+    if win32security is None or win32api is None or win32con is None:
+        raise WindowsHostServiceError("Windows pipe client identity verification unavailable.")
+
+    win32pipe.ImpersonateNamedPipeClient(pipe)
+    try:
+        thread_token = win32security.OpenThreadToken(
+            win32api.GetCurrentThread(),
+            win32con.TOKEN_QUERY,
+            True,
+        )
+        if not _token_contains_sid(thread_token, allowed_client_sid, win32security):
+            raise WindowsHostServiceError("Windows host service pipe client is not authorized.")
+    finally:
+        win32security.RevertToSelf()
+
+
+def _token_contains_sid(token: Any, allowed_sid: str, win32security: Any) -> bool:
+    """Return true when TokenUser or TokenGroups contains the configured SID."""
+
+    token_user = win32security.GetTokenInformation(token, win32security.TokenUser)
+    if _sid_to_string(token_user[0], win32security).lower() == allowed_sid.lower():
+        return True
+
+    try:
+        groups = win32security.GetTokenInformation(token, win32security.TokenGroups)
+    except Exception:
+        groups = []
+    for group in groups:
+        sid = group[0] if isinstance(group, tuple) else group
+        if _sid_to_string(sid, win32security).lower() == allowed_sid.lower():
+            return True
+    return False
+
+
+def _sid_to_string(sid: Any, win32security: Any) -> str:
+    try:
+        return win32security.ConvertSidToStringSid(sid)
+    except AttributeError:
+        return str(sid)
 
 
 def _load_windows_process_libraries() -> tuple[Any, Any, Any]:
