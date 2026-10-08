@@ -8,15 +8,17 @@ import json
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+from ..orchestrator_url import require_orchestrator_api_v1_url
 
 logger = structlog.get_logger()
 
@@ -47,7 +49,7 @@ class RunnerState:
     def _init_secrets_manager(self):
         """Initialize the secrets manager."""
         try:
-            from ..secrets import SecretsManager, EnvSecretsProvider, FileSecretsProvider
+            from ..secrets import EnvSecretsProvider, FileSecretsProvider, SecretsManager
 
             self.secrets_manager = SecretsManager()
 
@@ -205,7 +207,7 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
         """Get recent logs."""
         logs = state.recent_logs.copy()
         if level:
-            logs = [l for l in logs if l["level"] == level]
+            logs = [entry for entry in logs if entry["level"] == level]
         return {"logs": logs[-limit:]}
 
     @app.get("/api/logs/stream")
@@ -271,7 +273,12 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
         updated = []
 
         if update.orchestrator_url is not None:
-            state.config.orchestrator_url = update.orchestrator_url
+            try:
+                state.config.orchestrator_url = require_orchestrator_api_v1_url(
+                    update.orchestrator_url
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             updated.append("orchestrator_url")
         if update.api_key is not None:
             state.config.api_key = update.api_key
@@ -308,9 +315,10 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
         import httpx
 
         try:
+            orchestrator_url = require_orchestrator_api_v1_url(state.config.orchestrator_url)
             async with httpx.AsyncClient() as client:
                 response = await client.get(
-                    f"{state.config.orchestrator_url}/health",
+                    f"{orchestrator_url}/docs",
                     timeout=10.0,
                 )
                 if response.status_code == 200:
@@ -319,6 +327,8 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
                     return {"success": False, "message": f"Server returned {response.status_code}"}
         except httpx.RequestError as e:
             return {"success": False, "message": f"Connection failed: {str(e)}"}
+        except ValueError as e:
+            return {"success": False, "message": str(e)}
 
     # ============================================
     # Registration API
@@ -334,14 +344,16 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
     async def register_runner(req: RegisterRequest):
         """Register this runner with the orchestrator."""
         import httpx
+
         from ..system_info import get_system_info
 
         system_info = get_system_info()
 
         try:
+            orchestrator_url = require_orchestrator_api_v1_url(req.orchestrator_url)
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{req.orchestrator_url}/runners/register",
+                    f"{orchestrator_url}/runners/register",
                     json={
                         "name": req.name,
                         "labels": req.labels or {},
@@ -359,7 +371,7 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
 
                 # Update config
                 if state.config:
-                    state.config.orchestrator_url = req.orchestrator_url
+                    state.config.orchestrator_url = orchestrator_url
                     state.config.api_key = api_key
                     state.config.runner_name = req.name
                     if req.labels:
@@ -387,6 +399,11 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
             return {
                 "success": False,
                 "message": f"Connection failed: {str(e)}",
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "message": str(e),
             }
 
     # ============================================
@@ -470,7 +487,10 @@ def create_app(runner_state: RunnerState | None = None) -> FastAPI:
             except Exception as e:
                 return {"success": False, "message": str(e)}
 
-        return {"success": False, "message": "Agent not configured. Check orchestrator URL and API key."}
+        return {
+            "success": False,
+            "message": "Agent not configured. Check orchestrator URL and API key.",
+        }
 
     @app.post("/api/agent/stop")
     async def stop_agent():

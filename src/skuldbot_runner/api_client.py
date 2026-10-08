@@ -23,6 +23,7 @@ from .models import (
     StepProgress,
     StepStatus,
 )
+from .orchestrator_url import require_orchestrator_api_v1_url
 from .payloads import build_heartbeat_payload
 
 logger = structlog.get_logger()
@@ -33,7 +34,7 @@ class OrchestratorClient:
 
     def __init__(self, config: RunnerConfig):
         self.config = config
-        self.base_url = config.orchestrator_url.rstrip("/")
+        self.base_url = require_orchestrator_api_v1_url(config.orchestrator_url)
         self._client: httpx.AsyncClient | None = None
 
     @property
