@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .orchestrator_url import require_orchestrator_api_v1_url
+
 
 class ArtifactUploadError(RuntimeError):
     """Raised when a run artifact cannot be recorded as provider-backed evidence."""
@@ -75,6 +77,10 @@ class OrchestratorArtifactUploader:
 
         if not self._base_url:
             raise ArtifactUploadError("SKULDBOT_ORCHESTRATOR_URL is required for evidence upload.")
+        try:
+            base_url = require_orchestrator_api_v1_url(self._base_url)
+        except ValueError as exc:
+            raise ArtifactUploadError(str(exc)) from exc
         if not self._api_key:
             raise ArtifactUploadError("SKULDBOT_API_KEY is required for evidence upload.")
         if not self._classification:
@@ -104,7 +110,7 @@ class OrchestratorArtifactUploader:
         with artifact_path.open("rb") as artifact_file:
             try:
                 response = httpx.post(
-                    f"{self._base_url}/runner-agent/runs/{run_id}/artifacts",
+                    f"{base_url}/runner-agent/runs/{run_id}/artifacts",
                     headers={"Authorization": f"Bearer {self._api_key}"},
                     data=data,
                     files={

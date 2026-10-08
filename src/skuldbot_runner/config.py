@@ -12,8 +12,8 @@ class RunnerConfig(BaseSettings):
 
     # Orchestrator connection
     orchestrator_url: str = Field(
-        default="http://localhost:3000",
-        description="URL of the Orchestrator API",
+        default="http://localhost:3000/api/v1",
+        description="Versioned URL of the Orchestrator API, ending in /api/v1",
     )
     api_key: str = Field(
         default="",

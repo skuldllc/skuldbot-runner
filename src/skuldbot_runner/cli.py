@@ -12,7 +12,8 @@ from typing import Optional
 import structlog
 
 from .agent import RunnerAgent
-from .config import load_config, RunnerConfig
+from .config import load_config
+from .orchestrator_url import require_orchestrator_api_v1_url
 
 
 def setup_logging(level: str = "INFO"):
@@ -27,7 +28,11 @@ def setup_logging(level: str = "INFO"):
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
-            structlog.dev.ConsoleRenderer() if sys.stderr.isatty() else structlog.processors.JSONRenderer(),
+            (
+                structlog.dev.ConsoleRenderer()
+                if sys.stderr.isatty()
+                else structlog.processors.JSONRenderer()
+            ),
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
@@ -88,7 +93,8 @@ def cmd_ui(args):
     # Import here to avoid slow startup when not using UI
     try:
         import uvicorn
-        from .web.app import create_app, RunnerState
+
+        from .web.app import RunnerState, create_app
     except ImportError:
         logger.error("Web UI dependencies not installed. Run: pip install skuldbot-runner[web]")
         sys.exit(1)
@@ -124,7 +130,8 @@ def cmd_ui_agent(args):
 
     try:
         import uvicorn
-        from .web.app import create_app, RunnerState
+
+        from .web.app import RunnerState, create_app
     except ImportError:
         logger.error("Web UI dependencies not installed. Run: pip install skuldbot-runner[web]")
         sys.exit(1)
@@ -187,6 +194,7 @@ def cmd_ui_agent(args):
 async def cmd_register_async(args):
     """Register this runner with the orchestrator."""
     import httpx
+
     from .system_info import get_system_info
 
     config = load_config()
@@ -197,6 +205,11 @@ async def cmd_register_async(args):
     orchestrator_url = args.url or config.orchestrator_url
     if not orchestrator_url:
         logger.error("Orchestrator URL required. Use --url or set SKULDBOT_ORCHESTRATOR_URL")
+        sys.exit(1)
+    try:
+        orchestrator_url = require_orchestrator_api_v1_url(orchestrator_url)
+    except ValueError as exc:
+        logger.error("Invalid Orchestrator URL", error=str(exc))
         sys.exit(1)
 
     name = args.name or config.runner_name
@@ -244,7 +257,7 @@ async def cmd_register_async(args):
             print("=" * 60)
             print(f"\nRunner ID: {runner_id}")
             print(f"Runner Name: {name}")
-            print(f"\nAPI Key (save this - it won't be shown again):")
+            print("\nAPI Key (save this - it won't be shown again):")
             print(f"\n  {api_key}\n")
             print("Add to your environment:")
             print(f"  export SKULDBOT_API_KEY={api_key}")
@@ -255,7 +268,11 @@ async def cmd_register_async(args):
             print("=" * 60 + "\n")
 
         except httpx.HTTPStatusError as e:
-            logger.error("Registration failed", status=e.response.status_code, detail=e.response.text)
+            logger.error(
+                "Registration failed",
+                status=e.response.status_code,
+                detail=e.response.text,
+            )
             sys.exit(1)
         except httpx.RequestError as e:
             logger.error("Connection failed", error=str(e))
@@ -278,21 +295,21 @@ def cmd_status(args):
     print("SKULDBOT RUNNER STATUS")
     print("=" * 50)
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Orchestrator URL: {config.orchestrator_url or '(not set)'}")
     print(f"  API Key: {'***' + config.api_key[-8:] if config.api_key else '(not set)'}")
     print(f"  Runner Name: {config.runner_name}")
     print(f"  Labels: {config.labels or {}}")
     print(f"  Capabilities: {config.capabilities}")
 
-    print(f"\nSettings:")
+    print("\nSettings:")
     print(f"  Poll Interval: {config.poll_interval}s")
     print(f"  Heartbeat Interval: {config.heartbeat_interval}s")
     print(f"  Job Timeout: {config.job_timeout}s")
     print(f"  Work Directory: {config.work_dir}")
 
     system_info = get_system_info()
-    print(f"\nSystem:")
+    print("\nSystem:")
     print(f"  OS: {system_info.get('os', 'unknown')}")
     print(f"  Platform: {system_info.get('platform', 'unknown')}")
     print(f"  Python: {system_info.get('python_version', 'unknown')}")
@@ -300,10 +317,10 @@ def cmd_status(args):
     print(f"  Memory: {system_info.get('memory_total_gb', 0):.1f} GB")
 
     if config.orchestrator_url and config.api_key:
-        print(f"\nStatus: READY")
+        print("\nStatus: READY")
         print("  Run 'skuldbot-runner run' to start polling for jobs")
     else:
-        print(f"\nStatus: NOT CONFIGURED")
+        print("\nStatus: NOT CONFIGURED")
         print("  Run 'skuldbot-runner register' or 'skuldbot-runner ui' to configure")
 
     print("=" * 50 + "\n")
@@ -330,7 +347,11 @@ def main():
 
     # start command (ui + agent)
     start_parser = subparsers.add_parser("start", help="Start both web UI and agent")
-    start_parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
+    start_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind (default: 127.0.0.1)",
+    )
     start_parser.add_argument("--port", type=int, default=8585, help="Port to bind (default: 8585)")
     start_parser.add_argument("--open", action="store_true", help="Open browser automatically")
     start_parser.set_defaults(func=cmd_ui_agent)
