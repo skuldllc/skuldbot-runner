@@ -6,6 +6,10 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   binary-quality-gate:
     uses: skuldllc/.github/.github/workflows/binary-quality-gate.yml@b0e4b8251da9342333be956d5ad7249ca5e104c9
